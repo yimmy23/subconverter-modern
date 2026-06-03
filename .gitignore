@@ -1,0 +1,27 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+
+# Build outputs
+subconverter-modern
+dist/
+build/
+coverage/
+
+# Go
+*.test
+*.out
+vendor/
+
+# Runtime/cache
+*.log
+tmp/
+cache/
+
+# Secrets and private subscription material
+secrets.*
+*.secret
+*.token
+private/
+subscriptions/

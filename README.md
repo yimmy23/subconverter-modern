@@ -1,0 +1,192 @@
+# SubConverter Modern
+
+SubConverter Modern is a small self-hosted subscription converter written in Go.
+It converts Clash/Mihomo proxy sources or common proxy URI links into client-ready
+configuration formats.
+
+It is intentionally narrower than the original SubConverter project:
+
+- preserve modern Clash/Mihomo proxy fields instead of re-parsing everything
+- support modern node types such as AnyTLS and Hysteria2 when source data already
+  contains compatible fields
+- generate rule-based Mihomo YAML from a simple external template
+- expose a compact HTTP API that is easy to run behind a reverse proxy or tunnel
+
+## Supported Targets
+
+| Target aliases | Output |
+| --- | --- |
+| `clash`, `clashmeta`, `mihomo`, `stash`, `openclash` | Full Mihomo YAML |
+| `sing-box`, `singbox` | sing-box JSON |
+| `surge` | Basic Surge configuration |
+| `loon` | Basic Loon configuration |
+| `quanx`, `qx`, `quantumultx`, `quantumult-x` | Basic Quantumult X configuration |
+| `uri`, `mixed`, `v2ray`, `shadowrocket`, `passwall`, `passwall2` | URI node list |
+
+## Current Limitations
+
+- This is not a complete drop-in replacement for every legacy SubConverter
+  feature.
+- sing-box output converts outbounds, selectors, and inline rules. Remote rule
+  providers are not expanded into native sing-box rule sets yet.
+- Surge, Loon, and Quantumult X output is basic configuration output. Advanced
+  rewrite, MITM, scripting, and client-specific module semantics are not
+  converted.
+- URI-style output depends on protocol URI support. Some protocols may be better
+  represented in Mihomo YAML than in URI form.
+
+## Safety Notes
+
+- Treat subscription URLs and generated configs as secrets. They often contain
+  node credentials.
+- Do not publish private source URLs, tokens, or generated node lists.
+- The server fetches source and template URLs supplied by the request. Run it in
+  an environment that fits your trust model.
+- This tool does not bypass provider restrictions or client/User-Agent policies.
+  It only converts data that you are authorized to fetch.
+
+## Quick Start
+
+```bash
+git clone https://github.com/yimmy23/subconverter-modern.git
+cd subconverter-modern
+go run .
+```
+
+The service listens on `:25500` by default.
+
+```bash
+curl http://127.0.0.1:25500/version
+```
+
+## Docker
+
+```bash
+docker build -t subconverter-modern .
+docker run --rm -p 25500:25500 subconverter-modern
+```
+
+Use `LISTEN_ADDR` to change the bind address:
+
+```bash
+docker run --rm -p 127.0.0.1:25500:25500 \
+  -e LISTEN_ADDR=:25500 \
+  subconverter-modern
+```
+
+Use `DEFAULT_CONFIG_URL` to provide a default external template:
+
+```bash
+docker run --rm -p 127.0.0.1:25500:25500 \
+  -e DEFAULT_CONFIG_URL=https://example.com/template.ini \
+  subconverter-modern
+```
+
+## API
+
+### `GET /version`
+
+Returns the service version.
+
+### `GET /health`
+
+Returns a JSON health object.
+
+### `GET /sub`
+
+Converts a source subscription or node list.
+
+Parameters:
+
+| Name | Required | Description |
+| --- | --- | --- |
+| `target` | No | Output target. Defaults to `clash`. |
+| `url` | Yes | Source URL or inline source value. Multiple sources can be joined with `\|`. |
+| `config` | No | External template URL. If omitted, `DEFAULT_CONFIG_URL` is used. |
+| `filename` | No | Download filename. Defaults to `SubConverterModern`. |
+
+Example:
+
+```bash
+curl -G http://127.0.0.1:25500/sub \
+  --data-urlencode "target=clash" \
+  --data-urlencode "url=https://example.com/subscription.yaml" \
+  --data-urlencode "config=https://example.com/template.ini" \
+  --data-urlencode "filename=Profile" \
+  -o Profile.yaml
+```
+
+sing-box:
+
+```bash
+curl -G http://127.0.0.1:25500/sub \
+  --data-urlencode "target=sing-box" \
+  --data-urlencode "url=https://example.com/subscription.yaml" \
+  --data-urlencode "config=https://example.com/template.ini" \
+  -o Profile.json
+```
+
+URI list:
+
+```bash
+curl -G http://127.0.0.1:25500/sub \
+  --data-urlencode "target=uri" \
+  --data-urlencode "url=https://example.com/subscription.yaml" \
+  -o nodes.txt
+```
+
+## Template Syntax
+
+The optional external template uses a small subset of classic SubConverter-style
+syntax.
+
+Proxy groups:
+
+```ini
+custom_proxy_group=Proxy`select`[]AUTO`[]DIRECT`.*
+custom_proxy_group=AUTO`url-test`.*`http://www.gstatic.com/generate_204`300,5,100
+```
+
+Inline rules:
+
+```ini
+ruleset=DIRECT,[]DOMAIN,localhost
+ruleset=Proxy,[]DOMAIN-SUFFIX,example.com
+ruleset=Proxy,[]FINAL
+```
+
+Remote rule providers for Mihomo:
+
+```ini
+ruleset=Proxy,https://example.com/rules.yaml,86400
+```
+
+See [examples/example.ini](examples/example.ini).
+
+## Source Formats
+
+Supported source forms:
+
+- Clash/Mihomo YAML with a `proxies:` array
+- URI lines for `trojan`, `vless`, `hysteria2`/`hy2`, `anytls`, and `vmess`
+
+## Compatibility Endpoints
+
+These endpoints return `OK` for compatibility with older maintenance scripts:
+
+- `/refreshrules`
+- `/updateconf`
+
+`/readconf` returns a short text message because this server does not expose a
+mutable runtime config.
+
+## Development
+
+```bash
+go test ./...
+go build -trimpath -ldflags="-s -w" .
+```
+
+## License
+
+MIT
