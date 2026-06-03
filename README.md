@@ -10,6 +10,8 @@ It is intentionally narrower than the original SubConverter project:
 - support modern node types such as AnyTLS and Hysteria2 when source data already
   contains compatible fields
 - generate rule-based Mihomo YAML from a simple external template
+- sync common Surge-style DNS settings from `[General]` and `[Host]` into
+  Mihomo, sing-box, Surge, Loon, and Quantumult X outputs
 - expose a compact HTTP API that is easy to run behind a reverse proxy or tunnel
 
 ## Supported Targets
@@ -35,6 +37,9 @@ It is intentionally narrower than the original SubConverter project:
 - Surge, Loon, and Quantumult X output can pass through advanced sections when
   they already exist in the external template. It does not infer or translate
   script/MITM/rewrite semantics across different client ecosystems.
+- DNS conversion covers common resolver, encrypted resolver, fake-IP bypass,
+  host mapping, and per-domain resolver settings. It is not a full semantic
+  clone of every client-specific DNS option.
 - URI-style output depends on protocol URI support. Some protocols may be better
   represented in Mihomo YAML than in URI form.
 
@@ -198,6 +203,32 @@ Remote rule providers for Mihomo:
 ```ini
 ruleset=Proxy,https://example.com/rules.yaml,86400
 ```
+
+DNS settings:
+
+```ini
+[General]
+dns-server = 223.5.5.5, 119.29.29.29
+encrypted-dns-server = https://doh.pub/dns-query, https://dns.alidns.com/dns-query
+always-real-ip = *.lan, *.direct
+skip-proxy = localhost, *.local, 192.168.0.0/16
+hijack-dns = 8.8.8.8:53
+
+[Host]
+*.example.cn = server:223.5.5.5
+router.local = server:system
+nas.local = 192.168.1.10
+```
+
+DNS rendering by target:
+
+- Mihomo: emits `dns`, `hosts`, `fake-ip-filter`, `nameserver-policy`,
+  `proxy-server-nameserver`, and `direct-nameserver`.
+- sing-box: emits `dns.servers`, `dns.rules`, `fakeip`, and host/predefined
+  resolution rules.
+- Surge and Loon: preserve `[General]` DNS lines and `[Host]` lines when
+  applicable.
+- Quantumult X: maps common DNS settings into `[dns]` records.
 
 Advanced client-specific sections can be passed through if they already exist
 in the template:

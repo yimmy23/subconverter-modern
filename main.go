@@ -23,10 +23,10 @@ import (
 )
 
 const (
-	version          = "subconverter-modern v0.3.0"
+	version          = "subconverter-modern v0.4.0"
 	defaultListen    = ":25500"
 	defaultTestURL   = "http://www.gstatic.com/generate_204"
-	defaultUserAgent = "SubConverter-Modern/0.3"
+	defaultUserAgent = "SubConverter-Modern/0.4"
 	maxBodyBytes     = 12 << 20
 )
 
@@ -60,6 +60,7 @@ type mihomoConfig struct {
 	IPv6                    bool                    `yaml:"ipv6"`
 	TCPConcurrent           bool                    `yaml:"tcp-concurrent"`
 	GlobalClientFingerprint string                  `yaml:"global-client-fingerprint"`
+	Hosts                   map[string]any          `yaml:"hosts,omitempty"`
 	Profile                 profileConfig           `yaml:"profile"`
 	DNS                     dnsConfig               `yaml:"dns"`
 	Proxies                 []map[string]any        `yaml:"proxies"`
@@ -74,13 +75,19 @@ type profileConfig struct {
 }
 
 type dnsConfig struct {
-	Enable            bool     `yaml:"enable"`
-	IPv6              bool     `yaml:"ipv6"`
-	EnhancedMode      string   `yaml:"enhanced-mode"`
-	FakeIPRange       string   `yaml:"fake-ip-range"`
-	DefaultNameserver []string `yaml:"default-nameserver"`
-	Nameserver        []string `yaml:"nameserver"`
-	FakeIPFilter      []string `yaml:"fake-ip-filter"`
+	Enable                bool              `yaml:"enable"`
+	IPv6                  bool              `yaml:"ipv6"`
+	EnhancedMode          string            `yaml:"enhanced-mode"`
+	FakeIPRange           string            `yaml:"fake-ip-range"`
+	DefaultNameserver     []string          `yaml:"default-nameserver"`
+	Nameserver            []string          `yaml:"nameserver"`
+	ProxyServerNameserver []string          `yaml:"proxy-server-nameserver,omitempty"`
+	DirectNameserver      []string          `yaml:"direct-nameserver,omitempty"`
+	FakeIPFilter          []string          `yaml:"fake-ip-filter"`
+	UseHosts              bool              `yaml:"use-hosts,omitempty"`
+	UseSystemHosts        bool              `yaml:"use-system-hosts,omitempty"`
+	RespectRules          bool              `yaml:"respect-rules,omitempty"`
+	NameserverPolicy      map[string]string `yaml:"nameserver-policy,omitempty"`
 }
 
 type proxyGroup struct {
@@ -105,6 +112,18 @@ type parsedTemplate struct {
 	RuleProviders map[string]ruleProvider
 	Rules         []string
 	ExtraSections map[string][]string
+	DNS           dnsTemplate
+}
+
+type dnsTemplate struct {
+	General   map[string]string
+	HostLines []string
+}
+
+type hostEntry struct {
+	Domain string
+	Kind   string
+	Value  string
 }
 
 type renderResult struct {
@@ -536,6 +555,9 @@ func parseTemplate(text string, names []string) parsedTemplate {
 	result := parsedTemplate{
 		RuleProviders: map[string]ruleProvider{},
 		ExtraSections: map[string][]string{},
+		DNS: dnsTemplate{
+			General: map[string]string{},
+		},
 	}
 	providerByURL := map[string]string{}
 	currentSection := ""
@@ -543,6 +565,26 @@ func parseTemplate(text string, names []string) parsedTemplate {
 		line := strings.TrimSpace(rawLine)
 		if section, ok := sectionName(line); ok {
 			currentSection = section
+			continue
+		}
+		normalizedSection := normalizeSectionName(currentSection)
+		if isTemplateDirectiveSection(normalizedSection) && parseTemplateDirective(line, &result, providerByURL, names) {
+			continue
+		}
+		if normalizedSection == "general" {
+			if key, value, ok := parseKeyValueLine(line); ok && isDNSGeneralKey(key) {
+				result.DNS.General[strings.ToLower(key)] = value
+			}
+			continue
+		}
+		if normalizedSection == "host" {
+			if line != "" && !strings.HasPrefix(line, ";") && !strings.HasPrefix(line, "#") && !strings.HasPrefix(line, "//") {
+				cleaned := stripInlineComment(strings.TrimRight(rawLine, "\r"))
+				if strings.TrimSpace(cleaned) != "" {
+					result.DNS.HostLines = append(result.DNS.HostLines, cleaned)
+					result.ExtraSections["host"] = append(result.ExtraSections["host"], cleaned)
+				}
+			}
 			continue
 		}
 		if shouldCaptureExtraSection(currentSection) {
@@ -555,15 +597,7 @@ func parseTemplate(text string, names []string) parsedTemplate {
 		if line == "" || strings.HasPrefix(line, ";") || strings.HasPrefix(line, "#") {
 			continue
 		}
-		switch {
-		case strings.HasPrefix(line, "custom_proxy_group="):
-			group := parseProxyGroup(strings.TrimPrefix(line, "custom_proxy_group="), names)
-			if len(group.Proxies) > 0 {
-				result.Groups = append(result.Groups, group)
-			}
-		case strings.HasPrefix(line, "ruleset="):
-			parseRulesetLine(strings.TrimPrefix(line, "ruleset="), &result, providerByURL)
-		}
+		parseTemplateDirective(line, &result, providerByURL, names)
 	}
 	if len(result.Groups) == 0 {
 		result.Groups = []proxyGroup{{
@@ -574,6 +608,64 @@ func parseTemplate(text string, names []string) parsedTemplate {
 		result.Rules = append(result.Rules, "MATCH,"+result.Groups[0].Name)
 	}
 	return result
+}
+
+func isTemplateDirectiveSection(section string) bool {
+	return section == "" || section == "custom" || section == "general" || section == "host"
+}
+
+func parseTemplateDirective(line string, result *parsedTemplate, providerByURL map[string]string, names []string) bool {
+	line = strings.TrimSpace(line)
+	if line == "" || strings.HasPrefix(line, ";") || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
+		return false
+	}
+	switch {
+	case strings.HasPrefix(line, "custom_proxy_group="):
+		group := parseProxyGroup(strings.TrimPrefix(line, "custom_proxy_group="), names)
+		if len(group.Proxies) > 0 {
+			result.Groups = append(result.Groups, group)
+		}
+		return true
+	case strings.HasPrefix(line, "ruleset="):
+		parseRulesetLine(strings.TrimPrefix(line, "ruleset="), result, providerByURL)
+		return true
+	default:
+		return false
+	}
+}
+
+func parseKeyValueLine(line string) (string, string, bool) {
+	line = strings.TrimSpace(stripInlineComment(line))
+	if line == "" || strings.HasPrefix(line, ";") || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
+		return "", "", false
+	}
+	key, value, ok := strings.Cut(line, "=")
+	if !ok {
+		return "", "", false
+	}
+	key = strings.TrimSpace(key)
+	value = strings.TrimSpace(value)
+	return key, value, key != ""
+}
+
+func isDNSGeneralKey(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "dns-server", "encrypted-dns-server", "encrypted-dns-follow-outbound-mode",
+		"encrypted-dns-skip-cert-verification", "hijack-dns", "allow-dns-svcb",
+		"use-local-host-item-for-proxy", "always-real-ip", "skip-proxy", "bypass-tun":
+		return true
+	default:
+		return false
+	}
+}
+
+func stripInlineComment(line string) string {
+	for _, marker := range []string{" //", " #", " ;"} {
+		if idx := strings.Index(line, marker); idx >= 0 {
+			return strings.TrimSpace(line[:idx])
+		}
+	}
+	return strings.TrimSpace(line)
 }
 
 func sectionName(line string) (string, bool) {
@@ -597,6 +689,97 @@ func shouldCaptureExtraSection(name string) bool {
 	default:
 		return false
 	}
+}
+
+func csvValues(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return splitAndTrim(value, ",")
+}
+
+func boolFromString(value string) bool {
+	return value == "1" || strings.EqualFold(value, "true") || strings.EqualFold(value, "yes")
+}
+
+func filterDNSResolvers(values []string, allowEncrypted bool) []string {
+	var out []string
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || strings.EqualFold(value, "system") {
+			continue
+		}
+		if !allowEncrypted && strings.Contains(value, "://") {
+			continue
+		}
+		out = append(out, normalizeMihomoDNSResolver(value))
+	}
+	return uniqueStrings(out)
+}
+
+func normalizeMihomoDNSResolver(value string) string {
+	value = strings.TrimSpace(value)
+	switch {
+	case strings.HasPrefix(value, "h3://"):
+		return strings.Replace(value, "h3://", "https://", 1) + "#h3=true"
+	case strings.HasPrefix(value, "quic://"):
+		return strings.Replace(value, "quic://", "quic://", 1)
+	default:
+		return value
+	}
+}
+
+func dnsFilterDomains(template dnsTemplate) []string {
+	var values []string
+	for _, key := range []string{"always-real-ip", "skip-proxy"} {
+		for _, item := range csvValues(template.General[key]) {
+			item = strings.TrimSpace(item)
+			if item == "" || strings.Contains(item, "/") || net.ParseIP(strings.TrimSuffix(item, ":53")) != nil {
+				continue
+			}
+			if strings.Contains(item, ":") {
+				continue
+			}
+			values = append(values, item)
+		}
+	}
+	for _, entry := range parseHostEntries(template.HostLines) {
+		values = append(values, entry.Domain)
+	}
+	return uniqueStrings(values)
+}
+
+func parseHostEntries(lines []string) []hostEntry {
+	var out []hostEntry
+	for _, line := range lines {
+		key, value, ok := parseKeyValueLine(line)
+		if !ok {
+			continue
+		}
+		entry := hostEntry{Domain: key, Value: value, Kind: "alias"}
+		switch {
+		case strings.HasPrefix(value, "server:"):
+			entry.Kind = "server"
+			entry.Value = strings.TrimSpace(strings.TrimPrefix(value, "server:"))
+		case isAddressList(value):
+			entry.Kind = "address"
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+func isAddressList(value string) bool {
+	parts := splitAndTrim(value, ",")
+	if len(parts) == 0 {
+		return false
+	}
+	for _, part := range parts {
+		if net.ParseIP(strings.Trim(part, "[]")) == nil {
+			return false
+		}
+	}
+	return true
 }
 
 func parseProxyGroup(spec string, names []string) proxyGroup {
@@ -699,6 +882,7 @@ func inlineRule(policy, body string) string {
 }
 
 func buildConfig(proxies []map[string]any, parsed parsedTemplate) mihomoConfig {
+	dns := mihomoDNS(parsed.DNS)
 	return mihomoConfig{
 		MixedPort:               7890,
 		AllowLAN:                false,
@@ -707,24 +891,75 @@ func buildConfig(proxies []map[string]any, parsed parsedTemplate) mihomoConfig {
 		IPv6:                    true,
 		TCPConcurrent:           true,
 		GlobalClientFingerprint: "chrome",
+		Hosts:                   mihomoHosts(parsed.DNS),
 		Profile: profileConfig{
 			StoreSelected: true,
 			StoreFakeIP:   true,
 		},
-		DNS: dnsConfig{
-			Enable:            true,
-			IPv6:              true,
-			EnhancedMode:      "fake-ip",
-			FakeIPRange:       "198.18.0.1/16",
-			DefaultNameserver: []string{"223.5.5.5", "223.6.6.6", "119.29.29.29"},
-			Nameserver:        []string{"https://1.12.12.12/dns-query", "https://120.53.53.53/dns-query"},
-			FakeIPFilter:      []string{"*.lan", "*.local", "*.ts.net", "*.tailscale.com", "*.tailscale.io"},
-		},
+		DNS:           dns,
 		Proxies:       proxies,
 		ProxyGroups:   parsed.Groups,
 		RuleProviders: parsed.RuleProviders,
 		Rules:         parsed.Rules,
 	}
+}
+
+func mihomoDNS(template dnsTemplate) dnsConfig {
+	plainServers := filterDNSResolvers(csvValues(template.General["dns-server"]), false)
+	encryptedServers := filterDNSResolvers(csvValues(template.General["encrypted-dns-server"]), true)
+	if len(plainServers) == 0 {
+		plainServers = []string{"223.5.5.5", "223.6.6.6", "119.29.29.29"}
+	}
+	nameservers := encryptedServers
+	if len(nameservers) == 0 {
+		nameservers = append([]string{}, plainServers...)
+	}
+	fakeIPFilter := uniqueStrings(append([]string{
+		"*.lan", "*.local", "*.ts.net", "*.tailscale.com", "*.tailscale.io",
+	}, dnsFilterDomains(template)...))
+	policy := mihomoNameserverPolicy(template)
+
+	return dnsConfig{
+		Enable:                true,
+		IPv6:                  true,
+		EnhancedMode:          "fake-ip",
+		FakeIPRange:           "198.18.0.1/16",
+		DefaultNameserver:     plainServers,
+		Nameserver:            nameservers,
+		ProxyServerNameserver: nameservers,
+		DirectNameserver:      plainServers,
+		FakeIPFilter:          fakeIPFilter,
+		UseHosts:              len(template.HostLines) > 0,
+		UseSystemHosts:        true,
+		RespectRules:          boolFromString(template.General["encrypted-dns-follow-outbound-mode"]),
+		NameserverPolicy:      policy,
+	}
+}
+
+func mihomoHosts(template dnsTemplate) map[string]any {
+	hosts := map[string]any{}
+	for _, entry := range parseHostEntries(template.HostLines) {
+		if entry.Kind == "address" || entry.Kind == "alias" {
+			hosts[entry.Domain] = entry.Value
+		}
+	}
+	if len(hosts) == 0 {
+		return nil
+	}
+	return hosts
+}
+
+func mihomoNameserverPolicy(template dnsTemplate) map[string]string {
+	policy := map[string]string{}
+	for _, entry := range parseHostEntries(template.HostLines) {
+		if entry.Kind == "server" && entry.Value != "system" && entry.Value != "syslib" {
+			policy[entry.Domain] = normalizeMihomoDNSResolver(entry.Value)
+		}
+	}
+	if len(policy) == 0 {
+		return nil
+	}
+	return policy
 }
 
 func normalizeTarget(target string) string {
@@ -831,20 +1066,160 @@ func buildSingBoxConfig(proxies []map[string]any, parsed parsedTemplate, publicB
 	}
 
 	return singBoxConfig{
-		Log: map[string]any{"level": "info"},
-		DNS: map[string]any{
-			"servers": []map[string]any{
-				{"tag": "ali", "address": "https://223.5.5.5/dns-query", "detour": "DIRECT"},
-				{"tag": "dnspod", "address": "https://120.53.53.53/dns-query", "detour": "DIRECT"},
-			},
-			"final": "ali",
-		},
+		Log:       map[string]any{"level": "info"},
+		DNS:       singBoxDNS(parsed.DNS),
 		Outbounds: outbounds,
 		Route:     route,
 		Experimental: map[string]any{
 			"cache_file": map[string]any{"enabled": true},
 		},
 	}
+}
+
+func singBoxDNS(template dnsTemplate) map[string]any {
+	plainServers := filterDNSResolvers(csvValues(template.General["dns-server"]), false)
+	encryptedServers := filterDNSResolvers(csvValues(template.General["encrypted-dns-server"]), true)
+	if len(plainServers) == 0 {
+		plainServers = []string{"223.5.5.5", "223.6.6.6", "119.29.29.29"}
+	}
+	upstreams := encryptedServers
+	if len(upstreams) == 0 {
+		upstreams = plainServers
+	}
+	finalTag := "dns-1"
+
+	servers := []map[string]any{}
+	rules := []map[string]any{}
+	hosts := singBoxHosts(template)
+	if len(hosts) > 0 {
+		servers = append(servers, map[string]any{
+			"type":       "hosts",
+			"tag":        "hosts",
+			"predefined": hosts,
+		})
+		rules = append(rules, map[string]any{
+			"preferred_by": "hosts",
+			"action":       "route",
+			"server":       "hosts",
+		})
+	}
+
+	for i, server := range upstreams {
+		tag := fmt.Sprintf("dns-%d", i+1)
+		if i == 0 {
+			finalTag = tag
+		}
+		servers = append(servers, singBoxDNSServer(server, tag))
+	}
+	for i, server := range plainServers {
+		servers = append(servers, singBoxDNSServer(server, fmt.Sprintf("direct-dns-%d", i+1)))
+	}
+
+	serverTags := map[string]string{}
+	for _, entry := range parseHostEntries(template.HostLines) {
+		if entry.Kind != "server" {
+			continue
+		}
+		resolver := strings.TrimSpace(entry.Value)
+		tag := ""
+		switch resolver {
+		case "system", "syslib":
+			tag = "local"
+			if _, exists := serverTags[tag]; !exists {
+				servers = append(servers, map[string]any{"type": "local", "tag": tag})
+				serverTags[tag] = tag
+			}
+		default:
+			tag = "host-dns-" + slug(resolver)
+			if _, exists := serverTags[tag]; !exists {
+				servers = append(servers, singBoxDNSServer(resolver, tag))
+				serverTags[tag] = tag
+			}
+		}
+		if rule := singBoxDNSHostRule(entry.Domain, tag); rule != nil {
+			rules = append(rules, rule)
+		}
+	}
+
+	if len(servers) == 0 {
+		servers = append(servers, singBoxDNSServer("223.5.5.5", "dns-1"))
+	}
+	return map[string]any{
+		"servers":         servers,
+		"rules":           rules,
+		"final":           finalTag,
+		"strategy":        "prefer_ipv4",
+		"reverse_mapping": true,
+		"fakeip": map[string]any{
+			"enabled":     true,
+			"inet4_range": "198.18.0.0/15",
+		},
+	}
+}
+
+func singBoxDNSServer(value, tag string) map[string]any {
+	value = strings.TrimSpace(value)
+	switch {
+	case strings.HasPrefix(value, "https://"), strings.HasPrefix(value, "h3://"):
+		serverType := "https"
+		if strings.HasPrefix(value, "h3://") {
+			serverType = "h3"
+			value = "https://" + strings.TrimPrefix(value, "h3://")
+		}
+		u, err := url.Parse(value)
+		if err == nil && u.Hostname() != "" {
+			out := map[string]any{
+				"type":   serverType,
+				"tag":    tag,
+				"server": u.Hostname(),
+				"path":   firstNonEmpty(u.EscapedPath(), "/dns-query"),
+			}
+			if port := parseInt(u.Port(), 0); port > 0 {
+				out["server_port"] = port
+			}
+			return out
+		}
+	case strings.HasPrefix(value, "quic://"):
+		u, err := url.Parse(value)
+		if err == nil && u.Hostname() != "" {
+			out := map[string]any{"type": "quic", "tag": tag, "server": u.Hostname()}
+			if port := parseInt(u.Port(), 0); port > 0 {
+				out["server_port"] = port
+			}
+			return out
+		}
+	}
+	host := strings.TrimSuffix(value, ":53")
+	return map[string]any{"type": "udp", "tag": tag, "server": host}
+}
+
+func singBoxHosts(template dnsTemplate) map[string]any {
+	hosts := map[string]any{}
+	for _, entry := range parseHostEntries(template.HostLines) {
+		if entry.Kind != "address" && entry.Kind != "alias" {
+			continue
+		}
+		values := csvValues(entry.Value)
+		if len(values) == 1 {
+			hosts[entry.Domain] = values[0]
+		} else if len(values) > 1 {
+			hosts[entry.Domain] = values
+		}
+	}
+	return hosts
+}
+
+func singBoxDNSHostRule(domain, serverTag string) map[string]any {
+	rule := map[string]any{"action": "route", "server": serverTag}
+	switch {
+	case strings.HasPrefix(domain, "*."):
+		rule["domain_suffix"] = []string{strings.TrimPrefix(domain, "*.")}
+	case strings.HasPrefix(domain, "*"):
+		rule["domain_keyword"] = []string{strings.TrimPrefix(domain, "*")}
+	default:
+		rule["domain"] = []string{domain}
+	}
+	return rule
 }
 
 func singBoxRuleSets(providers map[string]ruleProvider, publicBaseURL string) []map[string]any {
@@ -1082,7 +1457,12 @@ func looksLikeDomain(value string) bool {
 
 func renderSurgeConfig(proxies []map[string]any, parsed parsedTemplate) string {
 	var b strings.Builder
-	b.WriteString("# Generated by subconverter-modern for Surge\n[General]\nloglevel = notify\n\n[Proxy]\n")
+	b.WriteString("# Generated by subconverter-modern for Surge\n[General]\nloglevel = notify\n")
+	for _, line := range surgeDNSGeneralLines(parsed.DNS) {
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	b.WriteString("\n[Proxy]\n")
 	for _, proxy := range proxies {
 		if line := surgeProxyLine(proxy); line != "" {
 			b.WriteString(line)
@@ -1112,7 +1492,12 @@ func renderSurgeConfig(proxies []map[string]any, parsed parsedTemplate) string {
 
 func renderLoonConfig(proxies []map[string]any, parsed parsedTemplate) string {
 	var b strings.Builder
-	b.WriteString("# Generated by subconverter-modern for Loon\n[General]\ninterface-mode = auto\nipv6 = true\n\n[Proxy]\n")
+	b.WriteString("# Generated by subconverter-modern for Loon\n[General]\ninterface-mode = auto\nipv6 = true\n")
+	for _, line := range loonDNSGeneralLines(parsed.DNS) {
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	b.WriteString("\n[Proxy]\n")
 	for _, proxy := range proxies {
 		if uri := proxyURI(proxy); uri != "" {
 			b.WriteString(stringValue(proxy["name"]))
@@ -1151,6 +1536,13 @@ func renderQuantumultXConfig(proxies []map[string]any, parsed parsedTemplate) st
 			b.WriteByte('\n')
 		}
 	}
+	if lines := quantumultXDNSLines(parsed.DNS); len(lines) > 0 {
+		b.WriteString("\n[dns]\n")
+		for _, line := range lines {
+			b.WriteString(line)
+			b.WriteByte('\n')
+		}
+	}
 	b.WriteString("\n[policy]\nstatic=Proxy, server-tag-regex=.*, direct, img-url=https://raw.githubusercontent.com/Koolson/Qure/master/IconSet/Color/Proxy.png\n\n[filter]\n")
 	for _, rule := range quantumultXRules(parsed.Rules) {
 		b.WriteString(rule)
@@ -1162,6 +1554,98 @@ func renderQuantumultXConfig(proxies []map[string]any, parsed parsedTemplate) st
 	appendExtraSection(&b, parsed, "task_remote", "task_remote")
 	appendExtraSection(&b, parsed, "mitm", "mitm")
 	return b.String()
+}
+
+func surgeDNSGeneralLines(template dnsTemplate) []string {
+	var out []string
+	for _, key := range []string{
+		"dns-server", "encrypted-dns-server", "encrypted-dns-follow-outbound-mode",
+		"encrypted-dns-skip-cert-verification", "hijack-dns", "allow-dns-svcb",
+		"use-local-host-item-for-proxy", "always-real-ip", "skip-proxy", "bypass-tun",
+	} {
+		if value := template.General[key]; value != "" {
+			out = append(out, key+" = "+value)
+		}
+	}
+	return out
+}
+
+func loonDNSGeneralLines(template dnsTemplate) []string {
+	var out []string
+	for _, key := range []string{"skip-proxy", "bypass-tun"} {
+		if value := template.General[key]; value != "" {
+			out = append(out, key+" = "+value)
+		}
+	}
+	if value := template.General["dns-server"]; value != "" {
+		out = append(out, "dns-server = "+value)
+	}
+	if encrypted := filterLoonDOHServers(csvValues(template.General["encrypted-dns-server"])); len(encrypted) > 0 {
+		out = append(out, "doh-server = "+strings.Join(encrypted, ", "))
+	}
+	return out
+}
+
+func filterLoonDOHServers(values []string) []string {
+	var out []string
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		switch {
+		case strings.HasPrefix(value, "https://"):
+			out = append(out, value)
+		case strings.HasPrefix(value, "h3://"):
+			out = append(out, "https://"+strings.TrimPrefix(value, "h3://"))
+		}
+	}
+	return uniqueStrings(out)
+}
+
+func quantumultXDNSLines(template dnsTemplate) []string {
+	var out []string
+	if encrypted := filterDNSResolvers(csvValues(template.General["encrypted-dns-server"]), true); len(encrypted) > 0 {
+		var doh []string
+		var doq []string
+		for _, item := range encrypted {
+			switch {
+			case strings.HasPrefix(item, "quic://"):
+				doq = append(doq, item)
+			case strings.HasPrefix(item, "https://"), strings.HasPrefix(item, "h3://"):
+				doh = append(doh, strings.Replace(item, "h3://", "https://", 1))
+			}
+		}
+		if len(doh) > 0 {
+			out = append(out, "doh-server = "+strings.Join(doh, ", "))
+		}
+		if len(doq) > 0 {
+			out = append(out, "doq-server = "+strings.Join(doq, ", "))
+		}
+	}
+	for _, server := range filterDNSResolvers(csvValues(template.General["dns-server"]), false) {
+		out = append(out, "server="+server)
+	}
+	for _, entry := range parseHostEntries(template.HostLines) {
+		switch entry.Kind {
+		case "address":
+			for _, value := range csvValues(entry.Value) {
+				out = append(out, "address=/"+quantumultXDNSDomain(entry.Domain)+"/"+strings.Trim(value, "[]"))
+			}
+		case "server":
+			if entry.Value == "system" || entry.Value == "syslib" {
+				out = append(out, "server=/"+quantumultXDNSDomain(entry.Domain)+"/system")
+			} else {
+				out = append(out, "server=/"+quantumultXDNSDomain(entry.Domain)+"/"+entry.Value)
+			}
+		}
+	}
+	return uniqueStrings(out)
+}
+
+func quantumultXDNSDomain(domain string) string {
+	domain = strings.TrimSpace(domain)
+	if strings.HasPrefix(domain, "*.") {
+		return "*." + strings.TrimPrefix(domain, "*.")
+	}
+	return domain
 }
 
 func appendExtraSection(b *strings.Builder, parsed parsedTemplate, outputName string, keys ...string) {
