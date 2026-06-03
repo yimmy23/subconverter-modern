@@ -23,10 +23,10 @@ import (
 )
 
 const (
-	version          = "subconverter-modern v0.2.0"
+	version          = "subconverter-modern v0.3.0"
 	defaultListen    = ":25500"
 	defaultTestURL   = "http://www.gstatic.com/generate_204"
-	defaultUserAgent = "SubConverter-Modern/0.2"
+	defaultUserAgent = "SubConverter-Modern/0.3"
 	maxBodyBytes     = 12 << 20
 )
 
@@ -49,6 +49,7 @@ var lanRules = []string{
 type server struct {
 	client           *http.Client
 	defaultConfigURL string
+	publicBaseURL    string
 }
 
 type mihomoConfig struct {
@@ -103,6 +104,7 @@ type parsedTemplate struct {
 	Groups        []proxyGroup
 	RuleProviders map[string]ruleProvider
 	Rules         []string
+	ExtraSections map[string][]string
 }
 
 type renderResult struct {
@@ -121,6 +123,11 @@ type singBoxConfig struct {
 	Experimental map[string]any   `json:"experimental,omitempty"`
 }
 
+type singBoxRuleSetSource struct {
+	Version int              `json:"version"`
+	Rules   []map[string]any `json:"rules"`
+}
+
 func main() {
 	s := &server{
 		client: &http.Client{
@@ -137,12 +144,14 @@ func main() {
 			},
 		},
 		defaultConfigURL: os.Getenv("DEFAULT_CONFIG_URL"),
+		publicBaseURL:    strings.TrimRight(os.Getenv("PUBLIC_BASE_URL"), "/"),
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/version", s.handleVersion)
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/sub", s.handleSub)
+	mux.HandleFunc("/ruleset", s.handleRuleset)
 	mux.HandleFunc("/refreshrules", s.handleNoop)
 	mux.HandleFunc("/updateconf", s.handleNoop)
 	mux.HandleFunc("/readconf", s.handleReadconf)
@@ -218,7 +227,7 @@ func (s *server) handleSub(w http.ResponseWriter, r *http.Request) {
 	}
 
 	parsed := parseTemplate(templateText, proxyNames(proxies))
-	rendered, err := renderTarget(target, proxies, parsed)
+	rendered, err := renderTarget(target, proxies, parsed, s.publicBaseForRequest(r))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -234,6 +243,45 @@ func (s *server) handleSub(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("x-content-type-options", "nosniff")
 	w.Header().Set("x-subconverter-renderer", rendered.Renderer)
 	_, _ = w.Write(rendered.Body)
+}
+
+func (s *server) handleRuleset(w http.ResponseWriter, r *http.Request) {
+	sourceURL := r.URL.Query().Get("url")
+	if sourceURL == "" {
+		writeError(w, http.StatusBadRequest, "missing url")
+		return
+	}
+	text, err := s.fetchText(sourceURL)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "ruleset fetch failed")
+		return
+	}
+	rules := parseHeadlessRuleSet(text)
+	body, err := json.MarshalIndent(singBoxRuleSetSource{Version: 3, Rules: rules}, "", "  ")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "ruleset json marshal failed")
+		return
+	}
+	body = append(body, '\n')
+	w.Header().Set("content-type", "application/json; charset=utf-8")
+	w.Header().Set("cache-control", "max-age=86400")
+	w.Header().Set("x-content-type-options", "nosniff")
+	_, _ = w.Write(body)
+}
+
+func (s *server) publicBaseForRequest(r *http.Request) string {
+	if s.publicBaseURL != "" {
+		return s.publicBaseURL
+	}
+	proto := firstNonEmpty(r.Header.Get("x-forwarded-proto"), "http")
+	if r.TLS != nil {
+		proto = firstNonEmpty(r.Header.Get("x-forwarded-proto"), "https")
+	}
+	host := firstNonEmpty(r.Header.Get("x-forwarded-host"), r.Host)
+	if host == "" {
+		return ""
+	}
+	return strings.TrimRight(proto+"://"+host, "/")
 }
 
 func isSupportedTarget(target string) bool {
@@ -487,10 +535,23 @@ func applyCommonQuery(proxy map[string]any, query url.Values) {
 func parseTemplate(text string, names []string) parsedTemplate {
 	result := parsedTemplate{
 		RuleProviders: map[string]ruleProvider{},
+		ExtraSections: map[string][]string{},
 	}
 	providerByURL := map[string]string{}
+	currentSection := ""
 	for _, rawLine := range strings.Split(text, "\n") {
 		line := strings.TrimSpace(rawLine)
+		if section, ok := sectionName(line); ok {
+			currentSection = section
+			continue
+		}
+		if shouldCaptureExtraSection(currentSection) {
+			if line != "" && !strings.HasPrefix(line, ";") && !strings.HasPrefix(line, "#") {
+				key := normalizeSectionName(currentSection)
+				result.ExtraSections[key] = append(result.ExtraSections[key], strings.TrimRight(rawLine, "\r"))
+			}
+			continue
+		}
 		if line == "" || strings.HasPrefix(line, ";") || strings.HasPrefix(line, "#") {
 			continue
 		}
@@ -513,6 +574,29 @@ func parseTemplate(text string, names []string) parsedTemplate {
 		result.Rules = append(result.Rules, "MATCH,"+result.Groups[0].Name)
 	}
 	return result
+}
+
+func sectionName(line string) (string, bool) {
+	if !strings.HasPrefix(line, "[") || !strings.HasSuffix(line, "]") {
+		return "", false
+	}
+	name := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(line, "["), "]"))
+	return name, name != ""
+}
+
+func normalizeSectionName(name string) string {
+	return strings.ToLower(strings.TrimSpace(name))
+}
+
+func shouldCaptureExtraSection(name string) bool {
+	switch normalizeSectionName(name) {
+	case "url rewrite", "header rewrite", "body rewrite", "map local", "map remote", "script", "mitm", "host",
+		"rewrite", "remote rewrite", "remote script", "plugin",
+		"rewrite_local", "rewrite_remote", "task_local", "task_remote":
+		return true
+	default:
+		return false
+	}
 }
 
 func parseProxyGroup(spec string, names []string) proxyGroup {
@@ -634,7 +718,7 @@ func buildConfig(proxies []map[string]any, parsed parsedTemplate) mihomoConfig {
 			FakeIPRange:       "198.18.0.1/16",
 			DefaultNameserver: []string{"223.5.5.5", "223.6.6.6", "119.29.29.29"},
 			Nameserver:        []string{"https://1.12.12.12/dns-query", "https://120.53.53.53/dns-query"},
-			FakeIPFilter:      []string{"*.lan", "*.local", "*.bigscale-atria.ts.net", "*.tailscale.com", "*.tailscale.io"},
+			FakeIPFilter:      []string{"*.lan", "*.local", "*.ts.net", "*.tailscale.com", "*.tailscale.io"},
 		},
 		Proxies:       proxies,
 		ProxyGroups:   parsed.Groups,
@@ -664,7 +748,7 @@ func normalizeTarget(target string) string {
 	}
 }
 
-func renderTarget(target string, proxies []map[string]any, parsed parsedTemplate) (renderResult, error) {
+func renderTarget(target string, proxies []map[string]any, parsed parsedTemplate, publicBaseURL string) (renderResult, error) {
 	switch normalizeTarget(target) {
 	case "mihomo":
 		body, err := yaml.Marshal(buildConfig(proxies, parsed))
@@ -673,7 +757,7 @@ func renderTarget(target string, proxies []map[string]any, parsed parsedTemplate
 		}
 		return renderResult{Body: body, ContentType: "text/yaml; charset=utf-8", Extension: "yaml", Renderer: "subconverter-modern/mihomo"}, nil
 	case "singbox":
-		body, err := json.MarshalIndent(buildSingBoxConfig(proxies, parsed), "", "  ")
+		body, err := json.MarshalIndent(buildSingBoxConfig(proxies, parsed, publicBaseURL), "", "  ")
 		if err != nil {
 			return renderResult{}, fmt.Errorf("sing-box json marshal failed")
 		}
@@ -689,14 +773,14 @@ func renderTarget(target string, proxies []map[string]any, parsed parsedTemplate
 		body := []byte(renderLoonConfig(proxies, parsed))
 		return renderResult{Body: body, ContentType: "text/plain; charset=utf-8", Extension: "conf", Renderer: "subconverter-modern/loon"}, nil
 	case "quanx":
-		body := []byte(renderQuantumultXConfig(proxies))
+		body := []byte(renderQuantumultXConfig(proxies, parsed))
 		return renderResult{Body: body, ContentType: "text/plain; charset=utf-8", Extension: "conf", Renderer: "subconverter-modern/quanx"}, nil
 	default:
 		return renderResult{}, fmt.Errorf("unsupported target")
 	}
 }
 
-func buildSingBoxConfig(proxies []map[string]any, parsed parsedTemplate) singBoxConfig {
+func buildSingBoxConfig(proxies []map[string]any, parsed parsedTemplate, publicBaseURL string) singBoxConfig {
 	outbounds := []map[string]any{
 		{"type": "direct", "tag": "DIRECT"},
 		{"type": "block", "tag": "REJECT"},
@@ -729,11 +813,21 @@ func buildSingBoxConfig(proxies []map[string]any, parsed parsedTemplate) singBox
 	}
 
 	routeRules, final := singBoxRules(parsed.Rules, tags)
+	route := map[string]any{
+		"rules":                 routeRules,
+		"final":                 final,
+		"auto_detect_interface": true,
+	}
+	if ruleSets := singBoxRuleSets(parsed.RuleProviders, publicBaseURL); len(ruleSets) > 0 {
+		route["rule_set"] = ruleSets
+	}
 	if final == "" && len(parsed.Groups) > 0 {
 		final = parsed.Groups[0].Name
+		route["final"] = final
 	}
 	if final == "" {
 		final = "DIRECT"
+		route["final"] = final
 	}
 
 	return singBoxConfig{
@@ -746,15 +840,34 @@ func buildSingBoxConfig(proxies []map[string]any, parsed parsedTemplate) singBox
 			"final": "ali",
 		},
 		Outbounds: outbounds,
-		Route: map[string]any{
-			"rules":                 routeRules,
-			"final":                 final,
-			"auto_detect_interface": true,
-		},
+		Route:     route,
 		Experimental: map[string]any{
 			"cache_file": map[string]any{"enabled": true},
 		},
 	}
+}
+
+func singBoxRuleSets(providers map[string]ruleProvider, publicBaseURL string) []map[string]any {
+	if len(providers) == 0 || publicBaseURL == "" {
+		return nil
+	}
+	names := make([]string, 0, len(providers))
+	for name := range providers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var out []map[string]any
+	for _, name := range names {
+		provider := providers[name]
+		out = append(out, map[string]any{
+			"type":            "remote",
+			"tag":             name,
+			"format":          "source",
+			"url":             publicBaseURL + "/ruleset?url=" + url.QueryEscape(provider.URL),
+			"update_interval": durationSeconds(provider.Interval, 86400),
+		})
+	}
+	return out
 }
 
 func singBoxOutbound(proxy map[string]any) map[string]any {
@@ -860,8 +973,16 @@ func singBoxRules(rules []string, tags map[string]bool) ([]map[string]any, strin
 		if !tags[policy] && policy != "DIRECT" && policy != "REJECT" {
 			continue
 		}
+		if kind == "RULE-SET" {
+			out = append(out, map[string]any{
+				"rule_set": []string{parts[1]},
+				"action":   "route",
+				"outbound": policy,
+			})
+			continue
+		}
 		value := parts[1]
-		r := map[string]any{"outbound": policy}
+		r := map[string]any{"action": "route", "outbound": policy}
 		switch kind {
 		case "DOMAIN":
 			r["domain"] = []string{value}
@@ -879,6 +1000,84 @@ func singBoxRules(rules []string, tags map[string]bool) ([]map[string]any, strin
 		out = append(out, r)
 	}
 	return out, final
+}
+
+func parseHeadlessRuleSet(text string) []map[string]any {
+	seen := map[string]bool{}
+	var out []map[string]any
+	add := func(rule map[string]any) {
+		if len(rule) == 0 {
+			return
+		}
+		keyBytes, _ := json.Marshal(rule)
+		key := string(keyBytes)
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		out = append(out, rule)
+	}
+
+	var doc map[string]any
+	if err := yaml.Unmarshal([]byte(text), &doc); err == nil {
+		if payload, ok := doc["payload"].([]any); ok {
+			for _, item := range payload {
+				add(headlessRuleFromLine(fmt.Sprint(item)))
+			}
+			return out
+		}
+	}
+
+	for _, rawLine := range strings.Split(text, "\n") {
+		add(headlessRuleFromLine(rawLine))
+	}
+	return out
+}
+
+func headlessRuleFromLine(rawLine string) map[string]any {
+	line := strings.TrimSpace(rawLine)
+	if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") || strings.HasPrefix(line, "//") {
+		return nil
+	}
+	line = strings.TrimPrefix(line, "- ")
+	line = strings.Trim(line, `"'`)
+	if line == "" || strings.EqualFold(line, "payload:") {
+		return nil
+	}
+	parts := splitAndTrim(line, ",")
+	if len(parts) == 0 {
+		return nil
+	}
+	kind := strings.ToUpper(parts[0])
+	if len(parts) == 1 {
+		if looksLikeDomain(parts[0]) {
+			return map[string]any{"domain_suffix": []string{strings.TrimPrefix(parts[0], ".")}}
+		}
+		return nil
+	}
+	value := parts[1]
+	switch kind {
+	case "DOMAIN":
+		return map[string]any{"domain": []string{value}}
+	case "DOMAIN-SUFFIX":
+		return map[string]any{"domain_suffix": []string{strings.TrimPrefix(value, ".")}}
+	case "DOMAIN-KEYWORD":
+		return map[string]any{"domain_keyword": []string{value}}
+	case "DOMAIN-REGEX":
+		return map[string]any{"domain_regex": []string{value}}
+	case "IP-CIDR", "IP-CIDR6":
+		return map[string]any{"ip_cidr": []string{value}}
+	default:
+		return nil
+	}
+}
+
+func looksLikeDomain(value string) bool {
+	value = strings.TrimSpace(strings.TrimPrefix(value, "."))
+	if value == "" || strings.ContainsAny(value, " /\\") {
+		return false
+	}
+	return strings.Contains(value, ".")
 }
 
 func renderSurgeConfig(proxies []map[string]any, parsed parsedTemplate) string {
@@ -900,6 +1099,14 @@ func renderSurgeConfig(proxies []map[string]any, parsed parsedTemplate) string {
 		b.WriteString(rule)
 		b.WriteByte('\n')
 	}
+	appendExtraSection(&b, parsed, "URL Rewrite", "url rewrite")
+	appendExtraSection(&b, parsed, "Header Rewrite", "header rewrite")
+	appendExtraSection(&b, parsed, "Body Rewrite", "body rewrite")
+	appendExtraSection(&b, parsed, "Map Local", "map local")
+	appendExtraSection(&b, parsed, "Map Remote", "map remote")
+	appendExtraSection(&b, parsed, "Script", "script")
+	appendExtraSection(&b, parsed, "Host", "host")
+	appendExtraSection(&b, parsed, "MITM", "mitm")
 	return b.String()
 }
 
@@ -924,10 +1131,17 @@ func renderLoonConfig(proxies []map[string]any, parsed parsedTemplate) string {
 		b.WriteString(strings.ReplaceAll(rule, "FINAL,", "FINAL,"))
 		b.WriteByte('\n')
 	}
+	appendMergedExtraSection(&b, parsed, "Rewrite", "rewrite", "url rewrite")
+	appendExtraSection(&b, parsed, "Remote Rewrite", "remote rewrite")
+	appendExtraSection(&b, parsed, "Script", "script")
+	appendExtraSection(&b, parsed, "Remote Script", "remote script")
+	appendExtraSection(&b, parsed, "Plugin", "plugin")
+	appendExtraSection(&b, parsed, "Host", "host")
+	appendExtraSection(&b, parsed, "MITM", "mitm")
 	return b.String()
 }
 
-func renderQuantumultXConfig(proxies []map[string]any) string {
+func renderQuantumultXConfig(proxies []map[string]any, parsed parsedTemplate) string {
 	var b strings.Builder
 	b.WriteString("# Generated by subconverter-modern for Quantumult X\n")
 	b.WriteString("# This renderer emits URI-style local nodes for import compatibility.\n\n[server_local]\n")
@@ -937,8 +1151,38 @@ func renderQuantumultXConfig(proxies []map[string]any) string {
 			b.WriteByte('\n')
 		}
 	}
-	b.WriteString("\n[policy]\nstatic=Proxy, server-tag-regex=.*, direct, img-url=https://raw.githubusercontent.com/Koolson/Qure/master/IconSet/Color/Proxy.png\n\n[filter]\nfinal, Proxy\n")
+	b.WriteString("\n[policy]\nstatic=Proxy, server-tag-regex=.*, direct, img-url=https://raw.githubusercontent.com/Koolson/Qure/master/IconSet/Color/Proxy.png\n\n[filter]\n")
+	for _, rule := range quantumultXRules(parsed.Rules) {
+		b.WriteString(rule)
+		b.WriteByte('\n')
+	}
+	appendExtraSection(&b, parsed, "rewrite_local", "rewrite_local")
+	appendExtraSection(&b, parsed, "rewrite_remote", "rewrite_remote")
+	appendExtraSection(&b, parsed, "task_local", "task_local")
+	appendExtraSection(&b, parsed, "task_remote", "task_remote")
+	appendExtraSection(&b, parsed, "mitm", "mitm")
 	return b.String()
+}
+
+func appendExtraSection(b *strings.Builder, parsed parsedTemplate, outputName string, keys ...string) {
+	appendMergedExtraSection(b, parsed, outputName, keys...)
+}
+
+func appendMergedExtraSection(b *strings.Builder, parsed parsedTemplate, outputName string, keys ...string) {
+	var lines []string
+	for _, key := range keys {
+		lines = append(lines, parsed.ExtraSections[normalizeSectionName(key)]...)
+	}
+	if len(lines) == 0 {
+		return
+	}
+	b.WriteString("\n[")
+	b.WriteString(outputName)
+	b.WriteString("]\n")
+	for _, line := range lines {
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
 }
 
 func proxyURIs(proxies []map[string]any) []string {
@@ -1116,6 +1360,52 @@ func surgeRules(parsed parsedTemplate) []string {
 			continue
 		}
 		out = append(out, rule)
+	}
+	return out
+}
+
+func quantumultXRules(rules []string) []string {
+	var out []string
+	for _, rule := range rules {
+		parts := splitAndTrim(rule, ",")
+		if len(parts) < 2 {
+			continue
+		}
+		kind := strings.ToUpper(parts[0])
+		if kind == "MATCH" && len(parts) >= 2 {
+			out = append(out, "final, "+parts[1])
+			continue
+		}
+		if kind == "RULE-SET" {
+			continue
+		}
+		if len(parts) < 3 {
+			continue
+		}
+		policy := parts[len(parts)-1]
+		if policy == "no-resolve" && len(parts) >= 4 {
+			policy = parts[len(parts)-2]
+		}
+		value := parts[1]
+		switch kind {
+		case "DOMAIN":
+			out = append(out, "host, "+value+", "+policy)
+		case "DOMAIN-SUFFIX":
+			out = append(out, "host-suffix, "+value+", "+policy)
+		case "DOMAIN-KEYWORD":
+			out = append(out, "host-keyword, "+value+", "+policy)
+		case "IP-CIDR", "IP-CIDR6":
+			suffix := ""
+			if parts[len(parts)-1] == "no-resolve" {
+				suffix = ", no-resolve"
+			}
+			out = append(out, "ip-cidr, "+value+", "+policy+suffix)
+		case "GEOIP":
+			out = append(out, "geoip, "+value+", "+policy)
+		}
+	}
+	if len(out) == 0 {
+		out = append(out, "final, Proxy")
 	}
 	return out
 }

@@ -27,11 +27,14 @@ It is intentionally narrower than the original SubConverter project:
 
 - This is not a complete drop-in replacement for every legacy SubConverter
   feature.
-- sing-box output converts outbounds, selectors, and inline rules. Remote rule
-  providers are not expanded into native sing-box rule sets yet.
-- Surge, Loon, and Quantumult X output is basic configuration output. Advanced
-  rewrite, MITM, scripting, and client-specific module semantics are not
-  converted.
+- sing-box output converts outbounds, selectors, inline rules, and remote
+  `ruleset=` entries. Remote list URLs are exposed as native sing-box
+  `route.rule_set` entries that point back to `/ruleset?url=...`, where this
+  service converts Surge/Clash-style rule lists into sing-box source rule-set
+  JSON.
+- Surge, Loon, and Quantumult X output can pass through advanced sections when
+  they already exist in the external template. It does not infer or translate
+  script/MITM/rewrite semantics across different client ecosystems.
 - URI-style output depends on protocol URI support. Some protocols may be better
   represented in Mihomo YAML than in URI form.
 
@@ -135,6 +138,41 @@ curl -G http://127.0.0.1:25500/sub \
   -o nodes.txt
 ```
 
+When `target=sing-box`, remote `ruleset=` entries become native sing-box
+`route.rule_set` records. Set `PUBLIC_BASE_URL` when the service is behind a
+reverse proxy so generated rule-set URLs are externally reachable:
+
+```bash
+PUBLIC_BASE_URL=https://sub.example.com subconverter-modern
+```
+
+### `GET /ruleset`
+
+Converts a remote Surge/Clash-style rule list into sing-box source rule-set JSON.
+
+Parameters:
+
+| Name | Required | Description |
+| --- | --- | --- |
+| `url` | Yes | Remote rule list URL. |
+
+Example:
+
+```bash
+curl -G http://127.0.0.1:25500/ruleset \
+  --data-urlencode "url=https://example.com/rules.list" \
+  -o rules.json
+```
+
+The output follows sing-box source rule-set shape:
+
+```json
+{
+  "version": 3,
+  "rules": []
+}
+```
+
 ## Template Syntax
 
 The optional external template uses a small subset of classic SubConverter-style
@@ -160,6 +198,32 @@ Remote rule providers for Mihomo:
 ```ini
 ruleset=Proxy,https://example.com/rules.yaml,86400
 ```
+
+Advanced client-specific sections can be passed through if they already exist
+in the template:
+
+```ini
+[URL Rewrite]
+^http://old.example.com https://new.example.com 302
+
+[Script]
+job = type=cron,cronexp="* * * * *",script-path=https://example.com/job.js
+
+[MITM]
+hostname = example.com
+
+[rewrite_local]
+^https://qx.example.com url reject
+```
+
+Supported passthrough sections:
+
+- Surge: `[URL Rewrite]`, `[Header Rewrite]`, `[Body Rewrite]`, `[Map Local]`,
+  `[Map Remote]`, `[Script]`, `[Host]`, `[MITM]`
+- Loon: `[Rewrite]`, `[URL Rewrite]`, `[Remote Rewrite]`, `[Script]`,
+  `[Remote Script]`, `[Plugin]`, `[Host]`, `[MITM]`
+- Quantumult X: `[rewrite_local]`, `[rewrite_remote]`, `[task_local]`,
+  `[task_remote]`, `[mitm]`
 
 See [examples/example.ini](examples/example.ini).
 
