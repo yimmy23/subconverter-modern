@@ -25,6 +25,7 @@ mtalk.google.com = 108.177.125.188
 
 custom_proxy_group=Proxy` + "`select`.*" + `
 ruleset=Proxy,[]DOMAIN-SUFFIX,example.com
+ruleset=DIRECT,[]GEOIP,CN,no-resolve
 ruleset=Proxy,https://example.com/rules.list,86400
 ruleset=Proxy,[]FINAL
 `
@@ -58,12 +59,30 @@ ruleset=Proxy,[]FINAL
 	if !singBoxHasDNSServer(singBox.DNS, "hosts") || !singBoxHasDNSServer(singBox.DNS, "dns-1") {
 		t.Fatalf("sing-box DNS servers missing hosts or upstream: %#v", singBox.DNS["servers"])
 	}
+	if !singBoxDNSServerHasField(singBox.DNS, "dns-1", "domain_resolver", "direct-dns-1") {
+		t.Fatalf("sing-box DoH server did not include a domain resolver: %#v", singBox.DNS["servers"])
+	}
+	if stringValue(singBox.Route["default_domain_resolver"]) != "direct-dns-1" {
+		t.Fatalf("sing-box route did not include a default domain resolver: %#v", singBox.Route)
+	}
 	singBoxBytes, err := json.Marshal(singBox)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(string(singBoxBytes), "preferred_by") || strings.Contains(string(singBoxBytes), "prefferedby") {
 		t.Fatalf("sing-box output contains version-sensitive preferred_by field: %s", singBoxBytes)
+	}
+	if strings.Contains(string(singBoxBytes), `"geoip":`) || strings.Contains(string(singBoxBytes), `"geosite":`) {
+		t.Fatalf("sing-box output contains removed geo database fields: %s", singBoxBytes)
+	}
+	if strings.Contains(string(singBoxBytes), `"fakeip":`) {
+		t.Fatalf("sing-box output contains removed legacy fakeip field: %s", singBoxBytes)
+	}
+	if !singBoxHasRouteRuleSet(singBox.Route, "geoip-cn", "DIRECT") {
+		t.Fatalf("sing-box output did not convert GEOIP to rule_set route: %#v", singBox.Route["rules"])
+	}
+	if !singBoxHasRemoteRuleSet(singBox.Route, "geoip-cn", "binary") {
+		t.Fatalf("sing-box output did not include geoip-cn binary rule-set: %#v", singBox.Route["rule_set"])
 	}
 	if !strings.Contains(string(singBoxBytes), `"server":"hosts"`) {
 		t.Fatalf("sing-box output did not route host entries to hosts server: %s", singBoxBytes)
@@ -138,6 +157,32 @@ func containsString(values []string, target string) bool {
 	return false
 }
 
+func singBoxHasRouteRuleSet(route map[string]any, tag, outbound string) bool {
+	rules, ok := route["rules"].([]map[string]any)
+	if !ok {
+		return false
+	}
+	for _, rule := range rules {
+		if stringValue(rule["outbound"]) == outbound && containsString(anyStringSlice(rule["rule_set"]), tag) {
+			return true
+		}
+	}
+	return false
+}
+
+func singBoxHasRemoteRuleSet(route map[string]any, tag, format string) bool {
+	ruleSets, ok := route["rule_set"].([]map[string]any)
+	if !ok {
+		return false
+	}
+	for _, ruleSet := range ruleSets {
+		if stringValue(ruleSet["tag"]) == tag && stringValue(ruleSet["type"]) == "remote" && stringValue(ruleSet["format"]) == format {
+			return true
+		}
+	}
+	return false
+}
+
 func singBoxHasDNSServer(dns map[string]any, tag string) bool {
 	servers, ok := dns["servers"].([]map[string]any)
 	if !ok {
@@ -145,6 +190,19 @@ func singBoxHasDNSServer(dns map[string]any, tag string) bool {
 	}
 	for _, server := range servers {
 		if stringValue(server["tag"]) == tag {
+			return true
+		}
+	}
+	return false
+}
+
+func singBoxDNSServerHasField(dns map[string]any, tag, field, value string) bool {
+	servers, ok := dns["servers"].([]map[string]any)
+	if !ok {
+		return false
+	}
+	for _, server := range servers {
+		if stringValue(server["tag"]) == tag && stringValue(server[field]) == value {
 			return true
 		}
 	}

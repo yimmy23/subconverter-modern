@@ -23,12 +23,14 @@ import (
 )
 
 const (
-	version          = "subconverter-modern v0.4.3"
+	version          = "subconverter-modern v0.4.7"
 	defaultListen    = ":25500"
 	defaultTestURL   = "http://www.gstatic.com/generate_204"
-	defaultUserAgent = "SubConverter-Modern/0.4.3"
+	defaultUserAgent = "SubConverter-Modern/0.4.7"
 	maxBodyBytes     = 12 << 20
 )
+
+const singGeoIPRuleSetBaseURL = "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/"
 
 var lanRules = []string{
 	"DOMAIN,localhost,DIRECT",
@@ -1058,12 +1060,10 @@ func buildSingBoxConfig(proxies []map[string]any, parsed parsedTemplate, publicB
 
 	routeRules, final := singBoxRules(parsed.Rules, tags)
 	route := map[string]any{
-		"rules":                 routeRules,
-		"final":                 final,
-		"auto_detect_interface": true,
-	}
-	if ruleSets := singBoxRuleSets(parsed.RuleProviders, publicBaseURL); len(ruleSets) > 0 {
-		route["rule_set"] = ruleSets
+		"rules":                   routeRules,
+		"final":                   final,
+		"auto_detect_interface":   true,
+		"default_domain_resolver": "direct-dns-1",
 	}
 	if final == "" && len(parsed.Groups) > 0 {
 		final = parsed.Groups[0].Name
@@ -1072,6 +1072,9 @@ func buildSingBoxConfig(proxies []map[string]any, parsed parsedTemplate, publicB
 	if final == "" {
 		final = "DIRECT"
 		route["final"] = final
+	}
+	if ruleSets := append(singBoxRuleSets(parsed.RuleProviders, publicBaseURL), singBoxBuiltinRuleSets(routeRules, final)...); len(ruleSets) > 0 {
+		route["rule_set"] = ruleSets
 	}
 
 	return singBoxConfig{
@@ -1108,15 +1111,20 @@ func singBoxDNS(template dnsTemplate) map[string]any {
 		})
 	}
 
+	directResolverTag := "direct-dns-1"
+	for i, server := range plainServers {
+		tag := fmt.Sprintf("direct-dns-%d", i+1)
+		if i == 0 {
+			directResolverTag = tag
+		}
+		servers = append(servers, singBoxDNSServer(server, tag))
+	}
 	for i, server := range upstreams {
 		tag := fmt.Sprintf("dns-%d", i+1)
 		if i == 0 {
 			finalTag = tag
 		}
-		servers = append(servers, singBoxDNSServer(server, tag))
-	}
-	for i, server := range plainServers {
-		servers = append(servers, singBoxDNSServer(server, fmt.Sprintf("direct-dns-%d", i+1)))
+		servers = append(servers, singBoxDNSServer(server, tag, directResolverTag))
 	}
 
 	serverTags := map[string]string{}
@@ -1142,7 +1150,7 @@ func singBoxDNS(template dnsTemplate) map[string]any {
 		default:
 			tag = "host-dns-" + slug(resolver)
 			if _, exists := serverTags[tag]; !exists {
-				servers = append(servers, singBoxDNSServer(resolver, tag))
+				servers = append(servers, singBoxDNSServer(resolver, tag, directResolverTag))
 				serverTags[tag] = tag
 			}
 		}
@@ -1160,15 +1168,18 @@ func singBoxDNS(template dnsTemplate) map[string]any {
 		"final":           finalTag,
 		"strategy":        "prefer_ipv4",
 		"reverse_mapping": true,
-		"fakeip": map[string]any{
-			"enabled":     true,
-			"inet4_range": "198.18.0.0/15",
-		},
 	}
 }
 
-func singBoxDNSServer(value, tag string) map[string]any {
+func singBoxDNSServer(value, tag string, domainResolver ...string) map[string]any {
 	value = strings.TrimSpace(value)
+	resolverTag := firstNonEmpty(domainResolver...)
+	applyDomainResolver := func(out map[string]any) map[string]any {
+		if resolverTag != "" && resolverTag != tag && needsDNSServerDomainResolver(stringValue(out["server"])) {
+			out["domain_resolver"] = resolverTag
+		}
+		return out
+	}
 	switch {
 	case strings.HasPrefix(value, "https://"), strings.HasPrefix(value, "h3://"):
 		serverType := "https"
@@ -1187,7 +1198,7 @@ func singBoxDNSServer(value, tag string) map[string]any {
 			if port := parseInt(u.Port(), 0); port > 0 {
 				out["server_port"] = port
 			}
-			return out
+			return applyDomainResolver(out)
 		}
 	case strings.HasPrefix(value, "quic://"):
 		u, err := url.Parse(value)
@@ -1196,11 +1207,19 @@ func singBoxDNSServer(value, tag string) map[string]any {
 			if port := parseInt(u.Port(), 0); port > 0 {
 				out["server_port"] = port
 			}
-			return out
+			return applyDomainResolver(out)
 		}
 	}
 	host := strings.TrimSuffix(value, ":53")
-	return map[string]any{"type": "udp", "tag": tag, "server": host}
+	return applyDomainResolver(map[string]any{"type": "udp", "tag": tag, "server": host})
+}
+
+func needsDNSServerDomainResolver(server string) bool {
+	server = strings.Trim(server, "[]")
+	if server == "" || strings.EqualFold(server, "localhost") {
+		return false
+	}
+	return net.ParseIP(server) == nil
 }
 
 func singBoxHosts(template dnsTemplate) map[string]any {
@@ -1253,6 +1272,44 @@ func singBoxRuleSets(providers map[string]ruleProvider, publicBaseURL string) []
 		})
 	}
 	return out
+}
+
+func singBoxBuiltinRuleSets(routeRules []map[string]any, downloadDetour string) []map[string]any {
+	tags := map[string]bool{}
+	for _, rule := range routeRules {
+		for _, tag := range anyStringSlice(rule["rule_set"]) {
+			if strings.HasPrefix(tag, "geoip-") {
+				tags[tag] = true
+			}
+		}
+	}
+	if len(tags) == 0 {
+		return nil
+	}
+	if downloadDetour == "" || downloadDetour == "REJECT" {
+		downloadDetour = "DIRECT"
+	}
+	names := make([]string, 0, len(tags))
+	for tag := range tags {
+		names = append(names, tag)
+	}
+	sort.Strings(names)
+	out := make([]map[string]any, 0, len(names))
+	for _, tag := range names {
+		out = append(out, map[string]any{
+			"type":            "remote",
+			"tag":             tag,
+			"format":          "binary",
+			"url":             singGeoIPRuleSetBaseURL + tag + ".srs",
+			"update_interval": "86400s",
+			"download_detour": downloadDetour,
+		})
+	}
+	return out
+}
+
+func singBoxGeoIPRuleSetTag(country string) string {
+	return "geoip-" + slug(country)
 }
 
 func singBoxOutbound(proxy map[string]any) map[string]any {
@@ -1378,7 +1435,7 @@ func singBoxRules(rules []string, tags map[string]bool) ([]map[string]any, strin
 		case "IP-CIDR", "IP-CIDR6":
 			r["ip_cidr"] = []string{value}
 		case "GEOIP":
-			r["geoip"] = []string{strings.ToLower(value)}
+			r["rule_set"] = []string{singBoxGeoIPRuleSetTag(value)}
 		default:
 			continue
 		}
@@ -2185,6 +2242,28 @@ func stringValue(value any) string {
 		return ""
 	}
 	return strings.TrimSpace(fmt.Sprint(value))
+}
+
+func anyStringSlice(value any) []string {
+	switch v := value.(type) {
+	case []string:
+		return v
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			if text := stringValue(item); text != "" {
+				out = append(out, text)
+			}
+		}
+		return out
+	case string:
+		if strings.TrimSpace(v) == "" {
+			return nil
+		}
+		return []string{strings.TrimSpace(v)}
+	default:
+		return nil
+	}
 }
 
 func firstNonEmpty(values ...string) string {

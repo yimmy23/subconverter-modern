@@ -34,13 +34,21 @@ It is intentionally narrower than the original SubConverter project:
   `ruleset=` entries. Remote list URLs are exposed as native sing-box
   `route.rule_set` entries that point back to `/ruleset?url=...`, where this
   service converts Surge/Clash-style rule lists into sing-box source rule-set
-  JSON.
+  JSON. Surge-style `GEOIP,CN` rules are converted to sing-box `rule_set`
+  matches backed by SagerNet's `geoip-cn.srs` binary rule-set, because native
+  `geoip`/`geosite` route fields were removed in sing-box 1.12.
 - Surge, Loon, and Quantumult X output can pass through advanced sections when
   they already exist in the external template. It does not infer or translate
   script/MITM/rewrite semantics across different client ecosystems.
 - DNS conversion covers common resolver, encrypted resolver, fake-IP bypass,
   host mapping, and per-domain resolver settings. It is not a full semantic
   clone of every client-specific DNS option.
+- sing-box output avoids legacy `dns.fakeip` because that field was removed in
+  sing-box 1.14.
+- sing-box encrypted DNS servers with domain hostnames are given an explicit
+  `domain_resolver`, which is required by newer sing-box cores.
+- sing-box route output sets `default_domain_resolver` so outbound server
+  hostnames do not rely on deprecated implicit DNS resolution.
 - Mihomo/Clash targets drop Snell nodes with unsupported versions. Mihomo only
   supports Snell v1-v3, so v5 nodes are intentionally excluded instead of being
   rewritten into a broken lower-version node.
