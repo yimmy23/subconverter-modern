@@ -242,7 +242,8 @@ DNS rendering by target:
 - Mihomo: emits `dns`, `hosts`, `fake-ip-filter`, `nameserver-policy`,
   `proxy-server-nameserver`, and `direct-nameserver`.
 - sing-box: emits `dns.servers`, `dns.rules`, `fakeip`, and host/predefined
-  resolution rules.
+  resolution rules. Host rules avoid `preferred_by` for compatibility with
+  older sing-box Android clients.
 - Surge and Loon: preserve `[General]` DNS lines and `[Host]` lines when
   applicable.
 - Quantumult X: maps common DNS settings into `[dns]` records.

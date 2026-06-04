@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -56,6 +57,16 @@ ruleset=Proxy,[]FINAL
 	}
 	if !singBoxHasDNSServer(singBox.DNS, "hosts") || !singBoxHasDNSServer(singBox.DNS, "dns-1") {
 		t.Fatalf("sing-box DNS servers missing hosts or upstream: %#v", singBox.DNS["servers"])
+	}
+	singBoxBytes, err := json.Marshal(singBox)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(singBoxBytes), "preferred_by") || strings.Contains(string(singBoxBytes), "prefferedby") {
+		t.Fatalf("sing-box output contains version-sensitive preferred_by field: %s", singBoxBytes)
+	}
+	if !strings.Contains(string(singBoxBytes), `"server":"hosts"`) {
+		t.Fatalf("sing-box output did not route host entries to hosts server: %s", singBoxBytes)
 	}
 	if !strings.Contains(renderSurgeConfig(proxies, parsed), "encrypted-dns-server = https://doh.pub/dns-query") {
 		t.Fatal("surge output did not include encrypted DNS settings")

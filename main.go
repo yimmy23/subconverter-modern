@@ -23,10 +23,10 @@ import (
 )
 
 const (
-	version          = "subconverter-modern v0.4.2"
+	version          = "subconverter-modern v0.4.3"
 	defaultListen    = ":25500"
 	defaultTestURL   = "http://www.gstatic.com/generate_204"
-	defaultUserAgent = "SubConverter-Modern/0.4.2"
+	defaultUserAgent = "SubConverter-Modern/0.4.3"
 	maxBodyBytes     = 12 << 20
 )
 
@@ -1106,11 +1106,6 @@ func singBoxDNS(template dnsTemplate) map[string]any {
 			"tag":        "hosts",
 			"predefined": hosts,
 		})
-		rules = append(rules, map[string]any{
-			"preferred_by": "hosts",
-			"action":       "route",
-			"server":       "hosts",
-		})
 	}
 
 	for i, server := range upstreams {
@@ -1126,6 +1121,12 @@ func singBoxDNS(template dnsTemplate) map[string]any {
 
 	serverTags := map[string]string{}
 	for _, entry := range parseHostEntries(template.HostLines) {
+		if (entry.Kind == "address" || entry.Kind == "alias") && len(hosts) > 0 {
+			if rule := singBoxDNSHostRule(entry.Domain, "hosts"); rule != nil {
+				rules = append(rules, rule)
+			}
+			continue
+		}
 		if entry.Kind != "server" {
 			continue
 		}
