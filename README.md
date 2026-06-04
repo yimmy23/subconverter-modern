@@ -40,6 +40,9 @@ It is intentionally narrower than the original SubConverter project:
 - DNS conversion covers common resolver, encrypted resolver, fake-IP bypass,
   host mapping, and per-domain resolver settings. It is not a full semantic
   clone of every client-specific DNS option.
+- Mihomo/Clash targets drop Snell nodes with unsupported versions. Mihomo only
+  supports Snell v1-v3, so v5 nodes are intentionally excluded instead of being
+  rewritten into a broken lower-version node.
 - URI-style output depends on protocol URI support. Some protocols may be better
   represented in Mihomo YAML than in URI form.
 

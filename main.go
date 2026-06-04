@@ -23,10 +23,10 @@ import (
 )
 
 const (
-	version          = "subconverter-modern v0.4.0"
+	version          = "subconverter-modern v0.4.1"
 	defaultListen    = ":25500"
 	defaultTestURL   = "http://www.gstatic.com/generate_204"
-	defaultUserAgent = "SubConverter-Modern/0.4"
+	defaultUserAgent = "SubConverter-Modern/0.4.1"
 	maxBodyBytes     = 12 << 20
 )
 
@@ -53,20 +53,19 @@ type server struct {
 }
 
 type mihomoConfig struct {
-	MixedPort               int                     `yaml:"mixed-port"`
-	AllowLAN                bool                    `yaml:"allow-lan"`
-	Mode                    string                  `yaml:"mode"`
-	LogLevel                string                  `yaml:"log-level"`
-	IPv6                    bool                    `yaml:"ipv6"`
-	TCPConcurrent           bool                    `yaml:"tcp-concurrent"`
-	GlobalClientFingerprint string                  `yaml:"global-client-fingerprint"`
-	Hosts                   map[string]any          `yaml:"hosts,omitempty"`
-	Profile                 profileConfig           `yaml:"profile"`
-	DNS                     dnsConfig               `yaml:"dns"`
-	Proxies                 []map[string]any        `yaml:"proxies"`
-	ProxyGroups             []proxyGroup            `yaml:"proxy-groups"`
-	RuleProviders           map[string]ruleProvider `yaml:"rule-providers,omitempty"`
-	Rules                   []string                `yaml:"rules"`
+	MixedPort     int                     `yaml:"mixed-port"`
+	AllowLAN      bool                    `yaml:"allow-lan"`
+	Mode          string                  `yaml:"mode"`
+	LogLevel      string                  `yaml:"log-level"`
+	IPv6          bool                    `yaml:"ipv6"`
+	TCPConcurrent bool                    `yaml:"tcp-concurrent"`
+	Hosts         map[string]any          `yaml:"hosts,omitempty"`
+	Profile       profileConfig           `yaml:"profile"`
+	DNS           dnsConfig               `yaml:"dns"`
+	Proxies       []map[string]any        `yaml:"proxies"`
+	ProxyGroups   []proxyGroup            `yaml:"proxy-groups"`
+	RuleProviders map[string]ruleProvider `yaml:"rule-providers,omitempty"`
+	Rules         []string                `yaml:"rules"`
 }
 
 type profileConfig struct {
@@ -218,6 +217,7 @@ func (s *server) handleSub(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "unsupported target")
 		return
 	}
+	normalizedTarget := normalizeTarget(target)
 
 	sourceURL := query.Get("url")
 	if sourceURL == "" {
@@ -235,6 +235,11 @@ func (s *server) handleSub(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	proxies = filterProxiesForTarget(normalizedTarget, proxies)
+	if len(proxies) == 0 {
+		writeError(w, http.StatusBadRequest, "source contains no proxies supported by target")
+		return
+	}
 
 	templateText := ""
 	if configURL != "" {
@@ -246,7 +251,7 @@ func (s *server) handleSub(w http.ResponseWriter, r *http.Request) {
 	}
 
 	parsed := parseTemplate(templateText, proxyNames(proxies))
-	rendered, err := renderTarget(target, proxies, parsed, s.publicBaseForRequest(r))
+	rendered, err := renderTarget(normalizedTarget, proxies, parsed, s.publicBaseForRequest(r))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -884,14 +889,13 @@ func inlineRule(policy, body string) string {
 func buildConfig(proxies []map[string]any, parsed parsedTemplate) mihomoConfig {
 	dns := mihomoDNS(parsed.DNS)
 	return mihomoConfig{
-		MixedPort:               7890,
-		AllowLAN:                false,
-		Mode:                    "rule",
-		LogLevel:                "info",
-		IPv6:                    true,
-		TCPConcurrent:           true,
-		GlobalClientFingerprint: "chrome",
-		Hosts:                   mihomoHosts(parsed.DNS),
+		MixedPort:     7890,
+		AllowLAN:      false,
+		Mode:          "rule",
+		LogLevel:      "info",
+		IPv6:          true,
+		TCPConcurrent: true,
+		Hosts:         mihomoHosts(parsed.DNS),
 		Profile: profileConfig{
 			StoreSelected: true,
 			StoreFakeIP:   true,
@@ -1967,6 +1971,29 @@ func proxyNames(proxies []map[string]any) []string {
 		}
 	}
 	return names
+}
+
+func filterProxiesForTarget(target string, proxies []map[string]any) []map[string]any {
+	target = normalizeTarget(target)
+	out := make([]map[string]any, 0, len(proxies))
+	for _, proxy := range proxies {
+		if proxySupportedByTarget(target, proxy) {
+			out = append(out, proxy)
+		}
+	}
+	return out
+}
+
+func proxySupportedByTarget(target string, proxy map[string]any) bool {
+	typ := strings.ToLower(stringValue(proxy["type"]))
+	switch target {
+	case "mihomo":
+		if typ == "snell" {
+			version := intValue(proxy["version"], 1)
+			return version >= 1 && version <= 3
+		}
+	}
+	return true
 }
 
 func dedupeProxies(proxies []map[string]any) []map[string]any {

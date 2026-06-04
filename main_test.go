@@ -74,6 +74,28 @@ ruleset=Proxy,[]FINAL
 	}
 }
 
+func TestMihomoFiltersUnsupportedSnellVersions(t *testing.T) {
+	proxies := []map[string]any{
+		{"name": "Snell V3", "type": "snell", "server": "v3.example.com", "port": 443, "psk": "secret", "version": 3},
+		{"name": "Snell V5", "type": "snell", "server": "v5.example.com", "port": 443, "psk": "secret", "version": 5},
+		{"name": "Trojan", "type": "trojan", "server": "trojan.example.com", "port": 443, "password": "secret"},
+	}
+	filtered := filterProxiesForTarget("clash", proxies)
+	if len(filtered) != 2 {
+		t.Fatalf("unexpected filtered proxy count: %d", len(filtered))
+	}
+	for _, proxy := range filtered {
+		if stringValue(proxy["name"]) == "Snell V5" {
+			t.Fatal("mihomo target kept unsupported snell v5 proxy")
+		}
+	}
+	parsed := parseTemplate("custom_proxy_group=Proxy`select`.*\nruleset=Proxy,[]FINAL\n", proxyNames(filtered))
+	config := buildConfig(filtered, parsed)
+	if containsString(config.ProxyGroups[0].Proxies, "Snell V5") {
+		t.Fatal("proxy group referenced filtered snell v5 proxy")
+	}
+}
+
 func containsString(values []string, target string) bool {
 	for _, value := range values {
 		if value == target {
