@@ -23,10 +23,10 @@ import (
 )
 
 const (
-	version          = "subconverter-modern v0.4.1"
+	version          = "subconverter-modern v0.4.2"
 	defaultListen    = ":25500"
 	defaultTestURL   = "http://www.gstatic.com/generate_204"
-	defaultUserAgent = "SubConverter-Modern/0.4.1"
+	defaultUserAgent = "SubConverter-Modern/0.4.2"
 	maxBodyBytes     = 12 << 20
 )
 
@@ -310,7 +310,7 @@ func (s *server) publicBaseForRequest(r *http.Request) string {
 
 func isSupportedTarget(target string) bool {
 	switch normalizeTarget(target) {
-	case "mihomo", "singbox", "uri", "surge", "loon", "quanx":
+	case "mihomo", "singbox", "uri", "v2rayng", "surge", "loon", "quanx":
 		return true
 	default:
 		return false
@@ -974,8 +974,10 @@ func normalizeTarget(target string) string {
 		return "mihomo"
 	case "sing-box", "singbox":
 		return "singbox"
-	case "uri", "mixed", "v2ray", "shadowrocket", "passwall", "passwall2":
+	case "uri", "mixed", "shadowrocket", "passwall", "passwall2":
 		return "uri"
+	case "v2ray", "v2rayng":
+		return "v2rayng"
 	case "surge":
 		return "surge"
 	case "loon":
@@ -1005,6 +1007,9 @@ func renderTarget(target string, proxies []map[string]any, parsed parsedTemplate
 	case "uri":
 		body := []byte(strings.Join(proxyURIs(proxies), "\n") + "\n")
 		return renderResult{Body: body, ContentType: "text/plain; charset=utf-8", Extension: "txt", Renderer: "subconverter-modern/uri"}, nil
+	case "v2rayng":
+		body := []byte(base64.StdEncoding.EncodeToString([]byte(strings.Join(proxyURIs(proxies), "\n") + "\n")))
+		return renderResult{Body: body, ContentType: "text/plain; charset=utf-8", Extension: "txt", Renderer: "subconverter-modern/v2rayng"}, nil
 	case "surge":
 		body := []byte(renderSurgeConfig(proxies, parsed))
 		return renderResult{Body: body, ContentType: "text/plain; charset=utf-8", Extension: "conf", Renderer: "subconverter-modern/surge"}, nil

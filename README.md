@@ -23,7 +23,8 @@ It is intentionally narrower than the original SubConverter project:
 | `surge` | Basic Surge configuration |
 | `loon` | Basic Loon configuration |
 | `quanx`, `qx`, `quantumultx`, `quantumult-x` | Basic Quantumult X configuration |
-| `uri`, `mixed`, `v2ray`, `shadowrocket`, `passwall`, `passwall2` | URI node list |
+| `v2ray`, `v2rayng` | Base64-encoded URI node list for v2rayNG-style subscriptions |
+| `uri`, `mixed`, `shadowrocket`, `passwall`, `passwall2` | Plain URI node list |
 
 ## Current Limitations
 
@@ -145,6 +146,19 @@ curl -G http://127.0.0.1:25500/sub \
   --data-urlencode "url=https://example.com/subscription.yaml" \
   -o nodes.txt
 ```
+
+v2rayNG subscription:
+
+```bash
+curl -G http://127.0.0.1:25500/sub \
+  --data-urlencode "target=v2rayng" \
+  --data-urlencode "url=https://example.com/subscription.yaml" \
+  -o v2rayng.txt
+```
+
+`target=v2rayng` returns the URI list wrapped in Base64, matching common
+v2rayNG subscription expectations. Use `target=uri` when you need a plain text
+URI list.
 
 When `target=sing-box`, remote `ruleset=` entries become native sing-box
 `route.rule_set` records. Set `PUBLIC_BASE_URL` when the service is behind a

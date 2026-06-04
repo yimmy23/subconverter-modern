@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 )
@@ -93,6 +94,27 @@ func TestMihomoFiltersUnsupportedSnellVersions(t *testing.T) {
 	config := buildConfig(filtered, parsed)
 	if containsString(config.ProxyGroups[0].Proxies, "Snell V5") {
 		t.Fatal("proxy group referenced filtered snell v5 proxy")
+	}
+}
+
+func TestV2rayNGTargetReturnsBase64URIList(t *testing.T) {
+	proxies := []map[string]any{{
+		"name": "Trojan", "type": "trojan", "server": "trojan.example.com", "port": 443,
+		"password": "secret", "sni": "example.com",
+	}}
+	result, err := renderTarget("v2rayng", proxies, parsedTemplate{}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(result.Body)))
+	if err != nil {
+		t.Fatalf("v2rayng output is not base64: %v", err)
+	}
+	if !strings.Contains(string(decoded), "trojan://") {
+		t.Fatalf("decoded v2rayng output did not contain URI list: %s", decoded)
+	}
+	if result.Renderer != "subconverter-modern/v2rayng" {
+		t.Fatalf("unexpected renderer: %s", result.Renderer)
 	}
 }
 
