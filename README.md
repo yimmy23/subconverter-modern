@@ -11,7 +11,7 @@ It is intentionally narrower than the original SubConverter project:
   contains compatible fields
 - generate rule-based Mihomo YAML from a simple external template
 - sync common Surge-style DNS settings from `[General]` and `[Host]` into
-  Mihomo, sing-box, Surge, Loon, and Quantumult X outputs
+  Mihomo, sing-box, Surfboard, Surge, Loon, and Quantumult X outputs
 - expose a compact HTTP API that is easy to run behind a reverse proxy or tunnel
 
 ## Supported Targets
@@ -20,6 +20,7 @@ It is intentionally narrower than the original SubConverter project:
 | --- | --- |
 | `clash`, `clashmeta`, `mihomo`, `stash`, `openclash` | Full Mihomo YAML |
 | `sing-box`, `singbox` | sing-box JSON |
+| `surfboard` | Native Surfboard configuration |
 | `surge` | Basic Surge configuration |
 | `loon` | Basic Loon configuration |
 | `quanx`, `qx`, `quantumultx`, `quantumult-x` | Basic Quantumult X configuration |
@@ -52,6 +53,10 @@ It is intentionally narrower than the original SubConverter project:
 - Mihomo/Clash targets drop Snell nodes with unsupported versions. Mihomo only
   supports Snell v1-v3, so v5 nodes are intentionally excluded instead of being
   rewritten into a broken lower-version node.
+- Surfboard output is rendered independently from Surge. It uses Surfboard's
+  documented `doh-server` key, drops unsupported VLESS nodes, removes missing
+  policy references, emits native health-check parameters, and normalizes Snell
+  v5 to v4 as documented by Surfboard.
 - URI-style output depends on protocol URI support. Some protocols may be better
   represented in Mihomo YAML than in URI form.
 
@@ -168,6 +173,16 @@ curl -G http://127.0.0.1:25500/sub \
 v2rayNG subscription expectations. Use `target=uri` when you need a plain text
 URI list.
 
+Surfboard:
+
+```bash
+curl -G http://127.0.0.1:25500/sub \
+  --data-urlencode "target=surfboard" \
+  --data-urlencode "url=https://example.com/subscription.yaml" \
+  --data-urlencode "config=https://example.com/template.ini" \
+  -o Profile.conf
+```
+
 When `target=sing-box`, remote `ruleset=` entries become native sing-box
 `route.rule_set` records. Set `PUBLIC_BASE_URL` when the service is behind a
 reverse proxy so generated rule-set URLs are externally reachable:
@@ -234,7 +249,7 @@ DNS settings:
 ```ini
 [General]
 dns-server = 223.5.5.5, 119.29.29.29
-encrypted-dns-server = https://doh.pub/dns-query, https://dns.alidns.com/dns-query
+doh-server = https://doh.pub/dns-query, https://dns.alidns.com/dns-query
 always-real-ip = *.lan, *.direct
 skip-proxy = localhost, *.local, 192.168.0.0/16
 hijack-dns = 8.8.8.8:53
@@ -247,13 +262,18 @@ nas.local = 192.168.1.10
 
 DNS rendering by target:
 
+Both `doh-server` and the legacy Surge-style `encrypted-dns-server` input key
+are accepted. Each renderer emits the native key expected by its target.
+
 - Mihomo: emits `dns`, `hosts`, `fake-ip-filter`, `nameserver-policy`,
   `proxy-server-nameserver`, and `direct-nameserver`.
 - sing-box: emits `dns.servers`, `dns.rules`, `fakeip`, and host/predefined
   resolution rules. Host rules avoid `preferred_by` for compatibility with
   older sing-box Android clients.
-- Surge and Loon: preserve `[General]` DNS lines and `[Host]` lines when
-  applicable.
+- Surfboard: emits documented `dns-server` and `doh-server` keys, explicit IPv6
+  and health-check defaults, plus `[Host]` entries.
+- Surge and Loon: preserve or translate `[General]` DNS lines and `[Host]` lines
+  when applicable.
 - Quantumult X: maps common DNS settings into `[dns]` records.
 
 Advanced client-specific sections can be passed through if they already exist
