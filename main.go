@@ -23,10 +23,10 @@ import (
 )
 
 const (
-	version          = "subconverter-modern v0.5.0"
+	version          = "subconverter-modern v0.5.1"
 	defaultListen    = ":25500"
 	defaultTestURL   = "http://www.gstatic.com/generate_204"
-	defaultUserAgent = "SubConverter-Modern/0.5.0"
+	defaultUserAgent = "SubConverter-Modern/0.5.1"
 	maxBodyBytes     = 12 << 20
 )
 
@@ -1632,12 +1632,64 @@ func renderSurfboardConfig(proxies []map[string]any, parsed parsedTemplate) stri
 	}
 
 	b.WriteString("\n[Rule]\n")
-	for _, rule := range surgeRules(parsed) {
+	fallbackPolicy := "DIRECT"
+	if len(parsed.Groups) > 0 && knownPolicies[parsed.Groups[0].Name] {
+		fallbackPolicy = parsed.Groups[0].Name
+	} else {
+		for _, proxy := range proxies {
+			if name := stringValue(proxy["name"]); knownPolicies[name] {
+				fallbackPolicy = name
+				break
+			}
+		}
+	}
+	for _, rule := range surfboardRules(parsed, knownPolicies, fallbackPolicy) {
 		b.WriteString(rule)
 		b.WriteByte('\n')
 	}
 	appendExtraSection(&b, parsed, "Host", "host")
 	return b.String()
+}
+
+func surfboardRules(parsed parsedTemplate, knownPolicies map[string]bool, fallbackPolicy string) []string {
+	var out []string
+	finalRule := ""
+	for _, rule := range surgeRules(parsed) {
+		parts := splitAndTrim(rule, ",")
+		if len(parts) < 2 {
+			continue
+		}
+		policyIndex := len(parts) - 1
+		if parts[policyIndex] == "no-resolve" {
+			policyIndex--
+		}
+		if strings.EqualFold(parts[0], "RULE-SET") {
+			if len(parts) < 3 {
+				continue
+			}
+			policyIndex = 2
+		}
+		if policyIndex <= 0 || policyIndex >= len(parts) {
+			continue
+		}
+		isFinal := strings.EqualFold(parts[0], "FINAL")
+		if !knownPolicies[parts[policyIndex]] {
+			if !isFinal {
+				continue
+			}
+			parts[policyIndex] = fallbackPolicy
+		}
+		normalized := strings.Join(parts, ",")
+		if isFinal {
+			finalRule = normalized
+			continue
+		}
+		out = append(out, normalized)
+	}
+	if finalRule != "" {
+		out = append(out, finalRule)
+	}
+	return out
 }
 
 func surfboardDoHServers(template dnsTemplate) []string {
@@ -1660,27 +1712,67 @@ func surfboardProxyLine(proxy map[string]any) string {
 	sni := firstNonEmpty(stringValue(proxy["sni"]), stringValue(proxy["servername"]))
 	skipCertVerify := boolValue(proxy["skip-cert-verify"])
 	udpRelay := proxyBoolDefault(proxy, true, "udp-relay", "udp")
+	fingerprint := stringValue(proxy["server-cert-fingerprint-sha256"])
+	network := strings.ToLower(stringValue(proxy["network"]))
 	var parts []string
 	switch typ {
 	case "trojan":
-		parts = []string{name + " = trojan", server, strconv.Itoa(port), "password=" + stringValue(proxy["password"])}
+		password := stringValue(proxy["password"])
+		if password == "" || (network != "" && network != "tcp" && network != "ws") {
+			return ""
+		}
+		parts = []string{name + " = trojan", server, strconv.Itoa(port), "password=" + password}
 		if sni != "" {
 			parts = append(parts, "sni="+sni)
 		}
-		parts = append(parts, "skip-cert-verify="+strconv.FormatBool(skipCertVerify), "udp-relay="+strconv.FormatBool(udpRelay))
+		parts = append(parts, "skip-cert-verify="+strconv.FormatBool(skipCertVerify))
+		parts = appendSurfboardValue(parts, "server-cert-fingerprint-sha256", fingerprint)
+		parts = append(parts, "udp-relay="+strconv.FormatBool(udpRelay))
+		if network == "ws" {
+			parts = append(parts, "ws=true")
+			parts = appendSurfboardWebSocket(parts, proxy)
+		}
 	case "anytls":
-		parts = []string{name + " = anytls", server, strconv.Itoa(port), stringValue(proxy["password"]), "skip-cert-verify=" + strconv.FormatBool(skipCertVerify)}
+		password := stringValue(proxy["password"])
+		if password == "" {
+			return ""
+		}
+		parts = []string{name + " = anytls", server, strconv.Itoa(port), password, "skip-cert-verify=" + strconv.FormatBool(skipCertVerify)}
 		if sni != "" {
 			parts = append(parts, "sni="+sni)
+		}
+		parts = appendSurfboardValue(parts, "server-cert-fingerprint-sha256", fingerprint)
+		if _, ok := proxy["reuse"]; ok {
+			parts = append(parts, "reuse="+strconv.FormatBool(boolValue(proxy["reuse"])))
 		}
 		parts = append(parts, "udp-relay="+strconv.FormatBool(udpRelay))
 	case "hysteria2", "hy2":
-		parts = []string{name + " = hysteria2", server, strconv.Itoa(port), "password=" + stringValue(proxy["password"]), "skip-cert-verify=" + strconv.FormatBool(skipCertVerify)}
+		password := stringValue(proxy["password"])
+		if password == "" {
+			return ""
+		}
+		parts = []string{name + " = hysteria2", server, strconv.Itoa(port), "password=" + password}
+		parts = appendSurfboardValue(parts, "download-bandwidth", firstNonEmpty(stringValue(proxy["download-bandwidth"]), stringValue(proxy["down"])))
+		if hopping := firstNonEmpty(stringValue(proxy["port-hopping"]), stringValue(proxy["ports"])); hopping != "" {
+			parts = append(parts, "port-hopping="+strconv.Quote(strings.Trim(hopping, "\"")))
+		}
+		parts = appendSurfboardValue(parts, "port-hopping-interval", stringValue(proxy["port-hopping-interval"]))
+		parts = append(parts, "skip-cert-verify="+strconv.FormatBool(skipCertVerify))
 		if sni != "" {
 			parts = append(parts, "sni="+sni)
 		}
+		parts = appendSurfboardValue(parts, "server-cert-fingerprint-sha256", fingerprint)
+		salamander := stringValue(proxy["salamander-password"])
+		if salamander == "" && strings.EqualFold(stringValue(proxy["obfs"]), "salamander") {
+			salamander = stringValue(proxy["obfs-password"])
+		}
+		parts = appendSurfboardValue(parts, "salamander-password", salamander)
 		parts = append(parts, "udp-relay="+strconv.FormatBool(udpRelay))
 	case "snell":
+		psk := stringValue(proxy["psk"])
+		if psk == "" {
+			return ""
+		}
 		version := intValue(proxy["version"], 4)
 		if version < 1 {
 			version = 1
@@ -1688,14 +1780,108 @@ func surfboardProxyLine(proxy map[string]any) string {
 		if version > 4 {
 			version = 4
 		}
-		parts = []string{name + " = snell", server, strconv.Itoa(port), "psk=" + stringValue(proxy["psk"]), "version=" + strconv.Itoa(version)}
+		parts = []string{name + " = snell", server, strconv.Itoa(port), "psk=" + psk, "version=" + strconv.Itoa(version)}
 		if version >= 3 {
 			parts = append(parts, "udp-relay="+strconv.FormatBool(udpRelay))
+		}
+		obfs, host, uri := surfboardObfsValues(proxy)
+		parts = appendSurfboardValue(parts, "obfs", obfs)
+		parts = appendSurfboardValue(parts, "obfs-host", host)
+		if strings.EqualFold(obfs, "http") {
+			parts = appendSurfboardValue(parts, "obfs-uri", uri)
+		}
+	case "vmess":
+		uuid := stringValue(proxy["uuid"])
+		if uuid == "" || (network != "" && network != "tcp" && network != "ws") {
+			return ""
+		}
+		ws := network == "ws"
+		tlsEnabled := boolValue(proxy["tls"])
+		parts = []string{name + " = vmess", server, strconv.Itoa(port), "username=" + uuid,
+			"udp-relay=" + strconv.FormatBool(udpRelay), "ws=" + strconv.FormatBool(ws), "tls=" + strconv.FormatBool(tlsEnabled)}
+		if ws {
+			parts = appendSurfboardWebSocket(parts, proxy)
+		}
+		if tlsEnabled {
+			parts = append(parts, "skip-cert-verify="+strconv.FormatBool(skipCertVerify))
+			if sni != "" {
+				parts = append(parts, "sni="+sni)
+			}
+			parts = appendSurfboardValue(parts, "server-cert-fingerprint-sha256", fingerprint)
+		}
+		if value, ok := proxy["vmess-aead"]; ok {
+			parts = append(parts, "vmess-aead="+strconv.FormatBool(boolValue(value)))
+		} else if intValue(proxy["alterId"], 0) > 0 {
+			parts = append(parts, "vmess-aead=false")
+		}
+	case "ss", "shadowsocks":
+		cipher := firstNonEmpty(stringValue(proxy["cipher"]), stringValue(proxy["encrypt-method"]))
+		password := stringValue(proxy["password"])
+		if cipher == "" || password == "" {
+			return ""
+		}
+		parts = []string{name + " = ss", server, strconv.Itoa(port), "encrypt-method=" + cipher, "password=" + password, "udp-relay=" + strconv.FormatBool(udpRelay)}
+		obfs, host, uri := surfboardObfsValues(proxy)
+		parts = appendSurfboardValue(parts, "obfs", obfs)
+		parts = appendSurfboardValue(parts, "obfs-host", host)
+		if strings.EqualFold(obfs, "http") {
+			parts = appendSurfboardValue(parts, "obfs-uri", uri)
 		}
 	default:
 		return ""
 	}
 	return strings.Join(parts, ", ")
+}
+
+func appendSurfboardValue(parts []string, key, value string) []string {
+	if value == "" {
+		return parts
+	}
+	if strings.Contains(value, ",") {
+		value = strconv.Quote(value)
+	}
+	return append(parts, key+"="+value)
+}
+
+func appendSurfboardWebSocket(parts []string, proxy map[string]any) []string {
+	if path := wsPath(proxy); path != "" {
+		parts = append(parts, "ws-path="+path)
+	}
+	opts, ok := normalizeMap(proxy["ws-opts"])
+	if !ok {
+		return parts
+	}
+	headers, ok := normalizeMap(opts["headers"])
+	if !ok || len(headers) == 0 {
+		return parts
+	}
+	keys := make([]string, 0, len(headers))
+	for key := range headers {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	values := make([]string, 0, len(keys))
+	for _, key := range keys {
+		values = append(values, key+":"+stringValue(headers[key]))
+	}
+	return append(parts, "ws-headers="+strings.Join(values, "|"))
+}
+
+func surfboardObfsValues(proxy map[string]any) (string, string, string) {
+	obfs := stringValue(proxy["obfs"])
+	host := stringValue(proxy["obfs-host"])
+	uri := stringValue(proxy["obfs-uri"])
+	if opts, ok := normalizeMap(proxy["obfs-opts"]); ok {
+		obfs = firstNonEmpty(obfs, stringValue(opts["mode"]), stringValue(opts["obfs"]))
+		host = firstNonEmpty(host, stringValue(opts["host"]), stringValue(opts["obfs-host"]))
+		uri = firstNonEmpty(uri, stringValue(opts["uri"]), stringValue(opts["obfs-uri"]))
+	}
+	if opts, ok := normalizeMap(proxy["plugin-opts"]); ok {
+		obfs = firstNonEmpty(obfs, stringValue(opts["mode"]), stringValue(opts["obfs"]))
+		host = firstNonEmpty(host, stringValue(opts["host"]), stringValue(opts["obfs-host"]))
+		uri = firstNonEmpty(uri, stringValue(opts["uri"]), stringValue(opts["obfs-uri"]))
+	}
+	return obfs, host, uri
 }
 
 func proxyBoolDefault(proxy map[string]any, fallback bool, keys ...string) bool {
@@ -2231,12 +2417,7 @@ func proxySupportedByTarget(target string, proxy map[string]any) bool {
 			return version >= 1 && version <= 3
 		}
 	case "surfboard":
-		switch typ {
-		case "trojan", "anytls", "hysteria2", "hy2", "snell":
-			return true
-		default:
-			return false
-		}
+		return surfboardProxyLine(proxy) != ""
 	}
 	return true
 }

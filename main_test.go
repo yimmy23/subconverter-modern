@@ -149,18 +149,21 @@ func TestV2rayNGTargetReturnsBase64URIList(t *testing.T) {
 }
 
 func TestSurfboardTargetUsesNativeDocumentedSyntax(t *testing.T) {
+	fingerprint := strings.Repeat("a", 64)
 	allProxies := []map[string]any{
-		{"name": "Trojan", "type": "trojan", "server": "trojan.example.com", "port": 443, "password": "trojan-secret", "sni": "tls.example.com", "skip-cert-verify": true},
-		{"name": "AnyTLS", "type": "anytls", "server": "anytls.example.com", "port": 443, "password": "anytls-secret", "sni": "tls.example.com", "skip-cert-verify": true},
-		{"name": "Hysteria2", "type": "hysteria2", "server": "hy2.example.com", "port": 443, "password": "hy2-secret", "sni": "tls.example.com", "skip-cert-verify": true},
-		{"name": "Snell", "type": "snell", "server": "snell.example.com", "port": 443, "psk": "snell-secret", "version": 5},
+		{"name": "Trojan", "type": "trojan", "server": "trojan.example.com", "port": 443, "password": "trojan-secret", "sni": "tls.example.com", "skip-cert-verify": true, "server-cert-fingerprint-sha256": fingerprint, "network": "ws", "ws-opts": map[string]any{"path": "/trojan", "headers": map[string]any{"Host": "ws.example.com"}}},
+		{"name": "AnyTLS", "type": "anytls", "server": "anytls.example.com", "port": 443, "password": "anytls-secret", "sni": "tls.example.com", "skip-cert-verify": true, "server-cert-fingerprint-sha256": fingerprint, "reuse": false},
+		{"name": "Hysteria2", "type": "hysteria2", "server": "hy2.example.com", "port": 443, "password": "hy2-secret", "sni": "tls.example.com", "skip-cert-verify": true, "server-cert-fingerprint-sha256": fingerprint, "down": 100, "ports": "1234;5000-6000", "port-hopping-interval": 30, "obfs": "salamander", "obfs-password": "obfs-secret"},
+		{"name": "Snell", "type": "snell", "server": "snell.example.com", "port": 443, "psk": "snell-secret", "version": 5, "obfs-opts": map[string]any{"mode": "http", "host": "obfs.example.com"}, "obfs-uri": "/snell"},
+		{"name": "VMess", "type": "vmess", "server": "vmess.example.com", "port": 443, "uuid": "00000000-0000-0000-0000-000000000001", "network": "ws", "tls": true, "servername": "tls.example.com", "skip-cert-verify": true, "server-cert-fingerprint-sha256": fingerprint, "ws-opts": map[string]any{"path": "/vmess", "headers": map[string]any{"Host": "ws.example.com"}}},
+		{"name": "Shadowsocks", "type": "ss", "server": "ss.example.com", "port": 443, "cipher": "2022-blake3-aes-256-gcm", "password": "c2hhZG93c29ja3MtcGFzc3dvcmQtMzItYnl0ZXM=", "udp": true, "obfs": "http", "obfs-host": "obfs.example.com", "obfs-uri": "/ss"},
 		{"name": "Unsupported VLESS", "type": "vless", "server": "vless.example.com", "port": 443, "uuid": "00000000-0000-0000-0000-000000000000"},
 	}
 	if !isSupportedTarget("surfboard") || normalizeTarget("surfboard") != "surfboard" {
 		t.Fatal("surfboard target is not registered")
 	}
 	proxies := filterProxiesForTarget("surfboard", allProxies)
-	if len(proxies) != 4 {
+	if len(proxies) != 6 {
 		t.Fatalf("unexpected Surfboard proxy count: %d", len(proxies))
 	}
 	template := `
@@ -170,9 +173,14 @@ doh-server = https://doh.pub/dns-query, https://dns.alidns.com/dns-query
 always-real-ip = *.direct, *.lan
 skip-proxy = localhost, *.local
 
+[Host]
+router.lan = 192.168.1.1
+
 [custom]
 custom_proxy_group=Proxy` + "`select`.*" + `
 custom_proxy_group=Auto` + "`url-test`.*`http://www.gstatic.com/generate_204`300,5,100" + `
+custom_proxy_group=Fallback` + "`fallback`.*`http://www.gstatic.com/generate_204`600,5" + `
+ruleset=MissingPolicy,[]DOMAIN,missing.example
 ruleset=Proxy,[]FINAL
 `
 	parsed := parseTemplate(template, proxyNames(proxies))
@@ -194,18 +202,22 @@ ruleset=Proxy,[]FINAL
 		"doh-server = https://doh.pub/dns-query, https://dns.alidns.com/dns-query",
 		"proxy-test-url = http://www.gstatic.com/generate_204",
 		"test-timeout = 5",
-		"Trojan = trojan, trojan.example.com, 443, password=trojan-secret, sni=tls.example.com, skip-cert-verify=true, udp-relay=true",
-		"AnyTLS = anytls, anytls.example.com, 443, anytls-secret, skip-cert-verify=true, sni=tls.example.com, udp-relay=true",
-		"Hysteria2 = hysteria2, hy2.example.com, 443, password=hy2-secret, skip-cert-verify=true, sni=tls.example.com, udp-relay=true",
-		"Snell = snell, snell.example.com, 443, psk=snell-secret, version=4, udp-relay=true",
-		"Auto = url-test, Trojan, AnyTLS, Hysteria2, Snell, url=http://www.gstatic.com/generate_204, interval=300, timeout=5, tolerance=100",
+		"Trojan = trojan, trojan.example.com, 443, password=trojan-secret, sni=tls.example.com, skip-cert-verify=true, server-cert-fingerprint-sha256=" + fingerprint + ", udp-relay=true, ws=true, ws-path=/trojan, ws-headers=Host:ws.example.com",
+		"AnyTLS = anytls, anytls.example.com, 443, anytls-secret, skip-cert-verify=true, sni=tls.example.com, server-cert-fingerprint-sha256=" + fingerprint + ", reuse=false, udp-relay=true",
+		"Hysteria2 = hysteria2, hy2.example.com, 443, password=hy2-secret, download-bandwidth=100, port-hopping=\"1234;5000-6000\", port-hopping-interval=30, skip-cert-verify=true, sni=tls.example.com, server-cert-fingerprint-sha256=" + fingerprint + ", salamander-password=obfs-secret, udp-relay=true",
+		"Snell = snell, snell.example.com, 443, psk=snell-secret, version=4, udp-relay=true, obfs=http, obfs-host=obfs.example.com, obfs-uri=/snell",
+		"VMess = vmess, vmess.example.com, 443, username=00000000-0000-0000-0000-000000000001, udp-relay=true, ws=true, tls=true, ws-path=/vmess, ws-headers=Host:ws.example.com, skip-cert-verify=true, sni=tls.example.com, server-cert-fingerprint-sha256=" + fingerprint,
+		"Shadowsocks = ss, ss.example.com, 443, encrypt-method=2022-blake3-aes-256-gcm, password=c2hhZG93c29ja3MtcGFzc3dvcmQtMzItYnl0ZXM=, udp-relay=true, obfs=http, obfs-host=obfs.example.com, obfs-uri=/ss",
+		"Auto = url-test, Trojan, AnyTLS, Hysteria2, Snell, VMess, Shadowsocks, url=http://www.gstatic.com/generate_204, interval=300, timeout=5, tolerance=100",
+		"Fallback = fallback, Trojan, AnyTLS, Hysteria2, Snell, VMess, Shadowsocks, url=http://www.gstatic.com/generate_204, interval=600, timeout=5",
 		"FINAL,Proxy",
+		"router.lan = 192.168.1.1",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("Surfboard output missing %q:\n%s", want, body)
 		}
 	}
-	for _, unwanted := range []string{"encrypted-dns-server", "Unsupported VLESS", "tls=true", "tfo=true"} {
+	for _, unwanted := range []string{"encrypted-dns-server", "Unsupported VLESS", "tls=true, sni=tls.example.com, skip-cert-verify=true, udp-relay=true", "tfo=true", "MissingPolicy", "missing.example"} {
 		if strings.Contains(body, unwanted) {
 			t.Errorf("Surfboard output contains unsupported or unwanted token %q:\n%s", unwanted, body)
 		}

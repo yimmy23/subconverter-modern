@@ -54,9 +54,12 @@ It is intentionally narrower than the original SubConverter project:
   supports Snell v1-v3, so v5 nodes are intentionally excluded instead of being
   rewritten into a broken lower-version node.
 - Surfboard output is rendered independently from Surge. It uses Surfboard's
-  documented `doh-server` key, drops unsupported VLESS nodes, removes missing
-  policy references, emits native health-check parameters, and normalizes Snell
-  v5 to v4 as documented by Surfboard.
+  documented `doh-server` key; supports native Trojan, VMess, Shadowsocks,
+  Snell, AnyTLS, and Hysteria2 syntax; preserves documented WebSocket,
+  obfuscation, port-hopping, certificate-pinning, reuse, and UDP parameters;
+  drops unsupported VLESS nodes; filters invalid group/rule policy references;
+  emits native health-check parameters; and treats Snell v5 as v4 as explicitly
+  documented by Surfboard.
 - URI-style output depends on protocol URI support. Some protocols may be better
   represented in Mihomo YAML than in URI form.
 
